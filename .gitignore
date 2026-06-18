@@ -9,11 +9,11 @@ venv/
 # VS Code
 .vscode/
 
-# Calibration images
-calibration_images/
+# Calibration dataset
+data/
 
-# Results
-results/
+# Calibration result
+calibration/
 
 # System files
 .DS_Store
