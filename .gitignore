@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+
+# VS Code
+.vscode/
+
+# Calibration images
+calibration_images/
+
+# Results
+results/
+
+# System files
+.DS_Store
+Thumbs.db
