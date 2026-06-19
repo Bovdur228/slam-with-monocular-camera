@@ -53,6 +53,8 @@ class KeyFrame:
         self.kp = kp
         self.des = des
 
+        self.id = None
+
         self.map_points = []
 
 
@@ -112,6 +114,7 @@ def create_KeyFrame(
         des,
         current_frame_map_points,
         keyframes,
+        keyframe_id,
 ):
     """
     создаёт новый KeyFrame.
@@ -124,6 +127,7 @@ def create_KeyFrame(
         kp,
         des
     )
+    kf.id = keyframe_id
 
     # сохраняем в текущий keyframe все точки, которые он увидел в кадре
     for mp, valid_kp_idx, in current_frame_map_points:
@@ -142,15 +146,15 @@ def create_KeyFrame(
 #------------------------------------------------------------------------------------------------------------------------------------------------
 def project_point(
     point_world,
-    global_R,
-    global_t,
+    kf_R,
+    kf_t,
     K
 ):
     """
-    Переводит мировую точку Pw в пиксельные координаты изображения.
+    Переводит мировую точку Pw в Pc и затем в пиксельные координаты изображения.
     """
 
-    Pc = global_R.T @ (point_world.reshape(3,1) - global_t)
+    Pc = kf_R.T @ (point_world.reshape(3,1) - kf_t)
 
     if Pc[2, 0] <= 0:
         return None
@@ -166,8 +170,8 @@ def project_point(
 def reprojection_error(
     point_world,
     observed_uv,
-    global_R,
-    global_t,
+    kf_R,
+    kf_t,
     K
 ):
     """
@@ -176,8 +180,8 @@ def reprojection_error(
     
     predicted_uv = project_point(
         point_world,
-        global_R,
-        global_t,
+        kf_R,
+        kf_t,
         K
     )
 
@@ -189,6 +193,87 @@ def reprojection_error(
     )
 
     return error
+
+# -------------------------------------------------------------------------------------------------------------------------------------------
+def build_ba_indices(
+    map_points,
+    keyframes
+):
+    idx_to_mp = {}
+    idx_to_kf = {}
+
+    for mp in map_points:
+        idx_to_mp[mp.id] = mp
+
+    for kf in keyframes:
+        idx_to_kf[kf.id] = kf
+
+    return idx_to_mp, idx_to_kf
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def collect_ba_observations(
+    map_points,
+):
+    ba_observations = []
+
+    for mp in map_points:
+        for obs in mp.observations:
+
+            keyframe = obs.keyframe
+            observed_uv = keyframe.kp[obs.keypoint_idx].pt
+
+            ba_observations.append((mp.id, keyframe.id, observed_uv))
+
+    return ba_observations
+
+# -------------------------------------------------------------------------------------------
+def compute_residual(
+        point_world,
+        observed_uv,
+        kf_R,
+        kf_t,
+        K
+):
+    predicted_uv = project_point(
+        point_world,
+        kf_R,
+        kf_t,
+        K,
+    )
+
+    if predicted_uv is None:
+        return np.inf, np.inf
+    
+    dx = predicted_uv[0] - observed_uv[0]
+    dy = predicted_uv[1] - observed_uv[1]
+
+    return dx, dy
+
+#---------------------------------------------------------------------------------------
+def build_residual_vector(
+    ba_observations,
+    id_to_mp,
+    id_to_kf,
+    K
+):
+    residual_vector = []
+
+    for mp_id, kf_id, observed_uv in ba_observations:
+        mp = id_to_mp[mp_id]
+        point_world = mp.position
+
+        kf = id_to_kf[kf_id]
+        kf_R = kf.R
+        kf_t = kf.t
+
+        dx, dy = compute_residual(point_world, observed_uv, kf_R, kf_t, K)
+
+        residual_vector.append(dx)
+        residual_vector.append(dy)
+
+    return np.array(residual_vector)
+
+
 
 # захват видео -----------------------------------------------------------------------------------------------------------------------------------
 cap = cv.VideoCapture(0)
@@ -204,7 +289,11 @@ prev_des = None
 
 # матрица K и distortion, взятые после калибровки камеры из файла mono_calibration.npz ------------------------------------------------------------
 calib_data = np.load(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "mono_calibration.npz")
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "calibration",
+        "mono_calibration.npz"
+    )
 )
 K = calib_data["K"]
 dist = calib_data["dist"]
@@ -241,9 +330,11 @@ last_keyFrame_R = None
 
 # список всех созданных KeyFrames -----------------------------------------------------------------------------------------------------------------
 keyframes = []
+keyframe_id = 0
 
-# сюда записываются мировые координаты map_points (список из объектов класса MapPoint) ------------------------------------------------------------
+# список всех созданных Map Points ----------------------------------------------------------------------------------------------------------------
 map_points = []
+map_point_id = 0
 
 # вспомогательная переменная для отрисовки Map Points на 2D карте, чтобы не рисовать каждый раз дубликаты -----------------------------------------
 last_drawn_map_point_idx = 0
@@ -465,6 +556,8 @@ while True:
                         obs.point_world,
                         obs.descriptor
                     )
+                    mp.id = map_point_id
+                    map_point_id += 1
 
                     map_points.append(mp)
 
@@ -487,8 +580,10 @@ while True:
                     kp,
                     des,
                     current_frame_map_points,
-                    keyframes
+                    keyframes,
+                    keyframe_id
                 )
+                keyframe_id += 1
 
                 last_keyFrame_t = global_t.copy()
                 last_keyFrame_R = global_R.copy()
@@ -516,8 +611,10 @@ while True:
                         kp,
                         des,
                         current_frame_map_points,
-                        keyframes
+                        keyframes,
+                        keyframe_id
                     )
+                    keyframe_id += 1
 
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
@@ -596,57 +693,23 @@ while True:
 
         break
 
-if len(map_points) > 0:
+ba_observations = collect_ba_observations(map_points)
 
-    mp = map_points[0]
+id_to_mp, id_to_kf = build_ba_indices(
+    map_points,
+    keyframes
+)
 
-    print("Observations count:", len(mp.observations))
+residuals = build_residual_vector(
+    ba_observations,
+    id_to_mp,
+    id_to_kf,
+    K
+)
 
-    for obs in mp.observations:
-
-        print(
-            "KF:",
-            id(obs.keyframe),
-            "kp_idx:",
-            obs.keypoint_idx
-        )
-
-errors = []
-
-for mp in map_points:
-
-    for obs in mp.observations:
-
-        kf = obs.keyframe
-
-        kp = kf.kp[obs.keypoint_idx]
-
-        error = reprojection_error(
-            mp.position,
-            np.array(kp.pt),
-            kf.R,
-            kf.t,
-            K
-        )
-
-        errors.append(error)
-
-if len(errors) > 0:
-
-    print(
-        "Mean reprojection error:",
-        np.mean(errors)
-    )
-
-    print(
-        "Median reprojection error:",
-        np.median(errors)
-    )
-
-    print(
-        "Max reprojection error:",
-        np.max(errors)
-    )
+print(type(residuals))
+print(residuals.shape)
+print(residuals[:10])
 
 cap.release()
 cv.destroyAllWindows()
