@@ -2,6 +2,8 @@ import cv2 as cv
 import numpy as np
 import os
 
+from scipy.optimize import least_squares
+
 
 # Класс MapPoint и его вспомогательные классы ----------------------------------------------------------------------------------------------------
 
@@ -143,6 +145,8 @@ def create_KeyFrame(
 
     keyframes.append(kf)
 
+# ФУНКЦИИ ДЛЯ BUNDLE ADJUSTMENT ===============================================================================================================
+
 #------------------------------------------------------------------------------------------------------------------------------------------------
 def project_point(
     point_world,
@@ -213,6 +217,7 @@ def build_ba_indices(
 # --------------------------------------------------------------------------------------------------------------------------------------------
 def collect_ba_observations(
     map_points,
+    K
 ):
     ba_observations = []
 
@@ -221,6 +226,17 @@ def collect_ba_observations(
 
             keyframe = obs.keyframe
             observed_uv = keyframe.kp[obs.keypoint_idx].pt
+
+            # проверяем что точка вообще проецируется перед камерой
+            predicted_uv = project_point(
+                mp.position,
+                keyframe.R,
+                keyframe.t,
+                K
+            )
+
+            if predicted_uv is None:
+                continue  # точка за камерой — пропускаем это наблюдение
 
             ba_observations.append((mp.id, keyframe.id, observed_uv))
 
@@ -272,6 +288,52 @@ def build_residual_vector(
         residual_vector.append(dy)
 
     return np.array(residual_vector)
+
+# ----------------------------------------------------------------------------------------------------------------------------------
+def pack_mappoint_parameters(
+        map_points,
+):
+    packed_mappoint_parameters = []
+
+    for mp in map_points:
+        packed_mappoint_parameters.append(mp.position[0])
+        packed_mappoint_parameters.append(mp.position[1])
+        packed_mappoint_parameters.append(mp.position[2])
+
+    return np.array(packed_mappoint_parameters)
+
+# -------------------------------------------------------------------------------------------------------------------------------------
+def unpack_mappoint_parameters(
+    packed_mappoint_parameters,
+    optimized_map_points
+):
+    packed_points = np.array(
+        packed_mappoint_parameters
+    ).reshape(-1, 3)
+
+    for mp, point in zip(optimized_map_points, packed_points):
+        mp.position = point
+
+# ---------------------------------------------------------------------------------------------------------------------------------------
+def ba_residuals(
+    packed_mappoint_parameters,
+    ba_observations,
+    map_points,
+    id_to_mp,
+    id_to_kf,
+    K
+):
+
+    unpack_mappoint_parameters(packed_mappoint_parameters, map_points)
+
+    residual_vector = build_residual_vector(
+        ba_observations,
+        id_to_mp,
+        id_to_kf,
+        K
+    )
+
+    return residual_vector
 
 
 
@@ -693,23 +755,98 @@ while True:
 
         break
 
-ba_observations = collect_ba_observations(map_points)
+# ТЕСТЫ =========================================================================================================================================
+test_map_points = map_points[:1000]
 
-id_to_mp, id_to_kf = build_ba_indices(
-    map_points,
-    keyframes
-)
-
-residuals = build_residual_vector(
-    ba_observations,
-    id_to_mp,
-    id_to_kf,
+ba_observations = collect_ba_observations(
+    test_map_points,
     K
 )
 
-print(type(residuals))
-print(residuals.shape)
-print(residuals[:10])
+idx_to_mp, idx_to_kf = build_ba_indices(
+    test_map_points,
+    keyframes
+)
+
+#?????????????????????????????????????????
+packed_mappoint_parameters = pack_mappoint_parameters(
+    map_points
+)
+
+residuals = ba_residuals(
+    packed_mappoint_parameters,
+    ba_observations,
+    map_points,
+    idx_to_mp,
+    idx_to_kf,
+    K
+)
+#??????????????????????????????????????????
+
+residual_vector = build_residual_vector(
+    ba_observations,
+    idx_to_mp,
+    idx_to_kf,
+    K
+)
+
+print("-" * 100)
+
+residuals_before = build_residual_vector(
+    ba_observations,
+    idx_to_mp,
+    idx_to_kf,
+    K
+)
+
+print("\n=== BEFORE BA ===")
+
+print("Mean abs residual:",
+      np.mean(np.abs(residuals_before)))
+
+print("Median abs residual:",
+      np.median(np.abs(residuals_before)))
+
+print("Max abs residual:",
+      np.max(np.abs(residuals_before)))
+
+print("-" * 100)
+
+
+# BA запускается один раз после остановки
+result = least_squares(
+    ba_residuals,
+    pack_mappoint_parameters(test_map_points),
+    args=(ba_observations, test_map_points, idx_to_mp, idx_to_kf, K),
+    loss='huber',
+    f_scale=5.0,
+    method='trf',
+    verbose=2   # показывает прогресс оптимизации
+)
+
+unpack_mappoint_parameters(
+    result.x,
+    test_map_points
+)
+
+residuals_after = build_residual_vector(
+    ba_observations,
+    idx_to_mp,
+    idx_to_kf,
+    K
+)
+
+print("\n=== AFTER BA ===")
+
+print("Mean abs residual:",
+      np.mean(np.abs(residuals_after)))
+
+print("Median abs residual:",
+      np.median(np.abs(residuals_after)))
+
+print("Max abs residual:",
+      np.max(np.abs(residuals_after)))
+
 
 cap.release()
 cv.destroyAllWindows()

@@ -20,6 +20,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DATASET_DIR = os.path.join(
     SCRIPT_DIR,
+    "calibration",
     "mono_dataset"
 )
 
