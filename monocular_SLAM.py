@@ -3,6 +3,7 @@ import numpy as np
 import os
 
 from scipy.optimize import least_squares
+from scipy.sparse import lil_matrix
 
 
 # Класс MapPoint и его вспомогательные классы ----------------------------------------------------------------------------------------------------
@@ -375,7 +376,7 @@ def pack_mappoint_parameters(
 
 # -------------------------------------------------------------------------------------------------------------------------------------
 def unpack_mappoint_parameters(
-    packed_mappoint_parameters,
+    packed_map_point_parameters,
     optimized_map_points
 ):
     """
@@ -389,16 +390,75 @@ def unpack_mappoint_parameters(
     оптимизатором.
     """
     packed_points = np.array(
-        packed_mappoint_parameters
+        packed_map_point_parameters
     ).reshape(-1, 3)
 
     for mp, point in zip(optimized_map_points, packed_points):
         mp.position = point
 
+# ------------------------------------------------------------------------------------------------------------------------------------------
+def pack_keyframe_parameters(keyframes):
+    """
+    Пакует ВСЕ keyframes, КРОМЕ первого (он — fixed/anchor).
+    """
+    packed = []
+
+    for kf in keyframes[1:]:
+        rvec, _ = cv.Rodrigues(kf.R)
+
+        packed.extend(rvec.flatten())
+        packed.extend(kf.t.flatten())
+
+    return np.array(packed)
+
+# ------------------------------------------------------------------------------------------------------------------------------------------
+def unpack_keyframe_parameters(packed, keyframes):
+    """
+    keyframes[0] остаётся нетронутым (anchor).
+    Распаковываем начиная с keyframes[1].
+    """
+    for i, kf in enumerate(keyframes[1:]):
+        rvec = packed[i*6 : i*6 + 3]
+        t    = packed[i*6 + 3 : i*6 + 6]
+
+        kf.R, _ = cv.Rodrigues(rvec)   # rvec → R
+        kf.t = t.reshape(3, 1)
+
+# -------------------------------------------------------------------------------------------------------------------------------------------
+def pack_all_parameters(
+    packed_keyframe_parameters,
+    packed_mappoint_parameters
+):
+
+    packed_all_parameters = np.concatenate(
+    [
+        packed_keyframe_parameters,
+        packed_mappoint_parameters
+    ]
+)
+
+    return packed_all_parameters
+
+# -------------------------------------------------------------------------------------------------------------------------------------------
+def unpack_all_parameters(
+    packed_all_parameters,
+    keyframes,
+    map_points
+):
+    all_keyframes = (len(keyframes) - 1) * 6
+
+    packed_keyframes = packed_all_parameters[:all_keyframes]
+    packed_map_points = packed_all_parameters[all_keyframes:]
+
+    unpack_keyframe_parameters(packed_keyframes, keyframes)
+    unpack_mappoint_parameters(packed_map_points, map_points)
+
+
 # -------------------------------------------------------------------------------------------------------------------------------------------
 def ba_residuals(
-    packed_mappoint_parameters,
+    packed_all_parameters,
     ba_observations,
+    keyframes,
     map_points,
     id_to_mp,
     id_to_kf,
@@ -407,8 +467,8 @@ def ba_residuals(
     """
     Целевая функция Bundle Adjustment для scipy.optimize.least_squares.
 
-    Получает текущий вектор параметров MapPoints, обновляет
-    координаты точек карты и вычисляет reprojection residuals
+    Получает текущий вектор параметров KeyFrames и MapPoints, обновляет
+     позу Keyframes и координаты точек карты, и вычисляет reprojection residuals
     для всех наблюдений.
 
     Возвращает единый вектор ошибок:
@@ -423,7 +483,7 @@ def ba_residuals(
     положения MapPoints с наблюдениями KeyFrames.
     """
 
-    unpack_mappoint_parameters(packed_mappoint_parameters, map_points)
+    unpack_all_parameters(packed_all_parameters, keyframes, map_points)
 
     residual_vector = build_residual_vector(
         ba_observations,
@@ -433,6 +493,249 @@ def ba_residuals(
     )
 
     return residual_vector
+
+# ------------------------------------------------------------------------------------------------------------------------------------
+def build_jac_sparsity(ba_observations, optimized_keyframes, optimized_map_points):
+
+    free_keyframes = optimized_keyframes[1:]        # <-- только свободные keyframes
+
+    n_residuals = len(ba_observations) * 2
+    n_kf_params = len(free_keyframes) * 6
+    n_mp_params = len(optimized_map_points) * 3
+    n_params = n_kf_params + n_mp_params
+
+    kf_id_to_idx = {kf.id: i for i, kf in enumerate(free_keyframes)}
+    mp_id_to_idx = {mp.id: i for i, mp in enumerate(optimized_map_points)}
+
+    sparsity = lil_matrix((n_residuals, n_params), dtype=int)
+
+    for obs_idx, (mp_id, kf_id, _) in enumerate(ba_observations):
+
+        row_dx = obs_idx * 2
+        row_dy = obs_idx * 2 + 1
+
+        if kf_id in kf_id_to_idx:
+            kf_idx = kf_id_to_idx[kf_id]
+            for col_offset in range(6):
+                col = kf_idx * 6 + col_offset
+                sparsity[row_dx, col] = 1
+                sparsity[row_dy, col] = 1
+
+        if mp_id in mp_id_to_idx:
+            mp_idx = mp_id_to_idx[mp_id]
+            for col_offset in range(3):
+                col = n_kf_params + mp_idx * 3 + col_offset
+                sparsity[row_dx, col] = 1
+                sparsity[row_dy, col] = 1
+
+    return sparsity
+
+# --------------------------------------------------------------------------------------------------------------------------------------
+def cull_mappoints_by_observations(
+    map_points,
+    min_observations=2
+):
+    good_points = []
+
+    for mp in map_points:
+
+        if len(mp.observations) >= min_observations:
+            good_points.append(mp)
+
+    return good_points
+
+# -----------------------------------------------------------------------------------------------------------------------------------------
+def collect_and_filter_observations(
+    map_points,
+    K,
+    max_initial_residual=50.0
+):
+    ba_observations = collect_ba_observations(map_points, K)
+
+    ba_observations_clean = []
+
+    mp_lookup = {
+    mp.id: mp
+    for mp in map_points
+    }
+
+    kf_lookup = {}
+    for mp in map_points:
+        for obs in mp.observations:
+            kf_lookup[obs.keyframe.id] = obs.keyframe
+
+    for mp_id, kf_id, observed_uv in ba_observations:
+
+        mp = mp_lookup[mp_id]
+        kf = kf_lookup[kf_id]
+
+        err = reprojection_error(
+            mp.position,
+            np.array(observed_uv),
+            kf.R,
+            kf.t,
+            K
+        )
+
+        if err < max_initial_residual:
+            ba_observations_clean.append(
+                (mp_id, kf_id, observed_uv)
+            )
+
+    #print(
+        #f"Observations before filter: {len(ba_observations)}"
+    #)
+
+    #print(
+        #f"Observations after filter: {len(ba_observations_clean)}"
+    #)
+
+    return ba_observations_clean
+
+# --------------------------------------------------------------------------------------------------------------------------------
+def filter_mappoints_by_observations(
+    map_points,
+    ba_observations,
+    min_observations=3
+):
+    """
+    Удаляет MapPoints, которые после всех фильтраций
+    имеют слишком мало наблюдений.
+    """
+
+    mp_obs_count = {}
+
+    for mp_id, _, _ in ba_observations:
+        mp_obs_count[mp_id] = mp_obs_count.get(mp_id, 0) + 1
+
+    filtered_points = [
+        mp
+        for mp in map_points
+        if mp_obs_count.get(mp.id, 0) >= min_observations
+    ]
+
+    return filtered_points
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def filter_keyframes_by_observations(
+    keyframes,
+    ba_observations,
+    fixed_keyframe_id,
+    min_observations=10
+):
+    """
+    Удаляет KeyFrames,
+    имеющие слишком мало наблюдений.
+    """
+
+    kf_obs_count = {}
+
+    for _, kf_id, _ in ba_observations:
+        kf_obs_count[kf_id] = kf_obs_count.get(kf_id, 0) + 1
+
+    filtered_keyframes = [
+        kf
+        for kf in keyframes
+        if kf.id == fixed_keyframe_id
+        or kf_obs_count.get(kf.id, 0) >= min_observations
+    ]
+
+    return filtered_keyframes
+
+# --------------------------------------------------------------------------------------------------------------------------------
+def filter_observations(
+    ba_observations,
+    map_points,
+    keyframes
+):
+    """
+    Оставляет только observations,
+    относящиеся к существующим MapPoints
+    и существующим KeyFrames.
+    """
+
+    valid_mp_ids = {mp.id for mp in map_points}
+
+    valid_kf_ids = {kf.id for kf in keyframes}
+
+    filtered_observations = [
+        (mp_id, kf_id, uv)
+        for mp_id, kf_id, uv in ba_observations
+        if mp_id in valid_mp_ids
+        and kf_id in valid_kf_ids
+    ]
+
+    return filtered_observations
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def cleanup_ba_graph(
+    fixed_keyframe,
+    map_points,
+    K,
+    min_mp_observations=3,
+    min_kf_observations=10,
+    max_initial_residual=50,
+):
+    keyframes = fixed_keyframe  # рабочий список, будет обновляться каждую итерацию
+    fixed_keyframe_id = keyframes[0].id
+    iteration = 0
+
+    while True:
+
+        iteration += 1
+
+        print(
+            f"Before Iteration {iteration}: "
+            f"{len(keyframes)} KFs, "
+            f"{len(map_points)} MPs, "
+        )
+
+        old_counts = (
+            len(map_points),
+            len(keyframes)          # <-- теперь берём актуальное значение с прошлой итерации
+        )
+
+        observations = collect_and_filter_observations(
+            map_points, K, max_initial_residual
+        )
+        print(f"{len(observations)} observations")
+        print("-" * 100)
+
+        map_points = filter_mappoints_by_observations(
+            map_points, observations, min_mp_observations
+        )
+
+        observations = collect_and_filter_observations(
+            map_points, K, max_initial_residual
+        )
+
+        keyframes = filter_keyframes_by_observations(
+            keyframes, observations, fixed_keyframe_id, min_kf_observations   # <-- фильтруем от текущего keyframes, а не от исходного
+        )
+
+        observations = filter_observations(
+            observations, map_points, keyframes
+        )
+
+        new_counts = (
+            len(map_points),
+            len(keyframes)
+        )
+
+        print(
+            f"After Iteration {iteration}: "
+            f"{len(keyframes)} KFs, "
+            f"{len(map_points)} MPs, "
+            f"{len(observations)} observations"
+        )
+        print("-" * 100)
+
+        if old_counts == new_counts:
+            break
+
+    idx_to_mp, idx_to_kf = build_ba_indices(map_points, keyframes)
+
+    return keyframes, map_points, observations, idx_to_mp, idx_to_kf
 
 # =============================================================================================================================================
 
@@ -603,7 +906,8 @@ while True:
             )
 
 # обновляем глобальное перемещение камеры в мире -------------------------------------------------------------------------------------------------
-            global_t = global_t + global_R @ t
+            #global_t = global_t + global_R @ t - так неправильно
+            global_t = global_t - global_R @ R.T @ t
             global_R = global_R @ R.T
 
 # # строим две Projection Matrix для текущей пары кадров (prev_frame и current_frame) ------------------------------------------------------------
@@ -749,8 +1053,8 @@ while True:
                 last_keyFrame_t = global_t.copy()
                 last_keyFrame_R = global_R.copy()
 
-                print(f"Keyframe saved: {len(keyframes)}")
-                print(len(map_points))
+                #print(f"Keyframe saved: {len(keyframes)}")
+                #print(len(map_points))
 
             # если хотя бы один KeyFrame есть, то смотрим, нужно ли создать новый KeyFrame
             elif last_keyFrame_t is not None and last_keyFrame_R is not None:
@@ -780,8 +1084,8 @@ while True:
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
 
-                    print(f"Keyframe saved: {len(keyframes)}")
-                    print(len(map_points))
+                    #print(f"Keyframe saved: {len(keyframes)}")
+                    #print(len(map_points))
 
 # рисуем 2D карту мира (вид сверху) --------------------------------------------------------------------------------------------------------------
 
@@ -850,46 +1154,87 @@ while True:
 
     if cv.waitKey(1) & 0xFF == 27:
         if len(map_points) > 0:
-            print(len(map_points))
+            print(f"Map Points count: {len(map_points)}")
+            print(f"KeyFrames count: {len(keyframes)}")
 
         break
 
+cap.release()
+cv.destroyAllWindows()
+
 # ТЕСТЫ =========================================================================================================================================
-test_map_points = map_points[:1000]
 
-ba_observations = collect_ba_observations(
+print("=" * 100)
+
+# =====================================================================
+# 1. Выбираем KeyFrames
+# =====================================================================
+
+test_keyframes = keyframes[:30]
+
+fixed_keyframe = test_keyframes[0]
+
+candidate_keyframes = test_keyframes[1:]
+
+# =====================================================================
+# 2. Собираем все MapPoints, которые видели эти KeyFrames
+# =====================================================================
+
+test_kf_ids = {kf.id for kf in test_keyframes}
+
+test_map_points = [
+    mp for mp in map_points
+    if any(obs.keyframe.id in test_kf_ids for obs in mp.observations)
+]
+
+# =====================================================================
+# 3. Build clean BA graph
+# =====================================================================
+
+optimized_keyframes, optimized_map_points, ba_observations, idx_to_mp, idx_to_kf = cleanup_ba_graph(
+    [fixed_keyframe] + candidate_keyframes,
     test_map_points,
-    K
+    K,
+    min_mp_observations=3,
+    min_kf_observations=10,
+    max_initial_residual=50,
 )
 
-idx_to_mp, idx_to_kf = build_ba_indices(
-    test_map_points,
-    keyframes
-)
+if not ba_observations or not optimized_keyframes or not optimized_map_points:
+    print("BA граф пуст после cleanup — недостаточно наблюдений для оптимизации.")
+    print(f"KFs: {len(optimized_keyframes)}, MPs: {len(optimized_map_points)}, Obs: {len(ba_observations)}")
+    exit()
 
-#?????????????????????????????????????????
-packed_mappoint_parameters = pack_mappoint_parameters(
-    map_points
-)
-
-residuals = ba_residuals(
-    packed_mappoint_parameters,
-    ba_observations,
-    map_points,
-    idx_to_mp,
-    idx_to_kf,
-    K
-)
-#??????????????????????????????????????????
-
-residual_vector = build_residual_vector(
-    ba_observations,
-    idx_to_mp,
-    idx_to_kf,
-    K
-)
+# =====================================================================
+# 4. Печатаем статистику
+# =====================================================================
 
 print("-" * 100)
+
+kf_obs_count = {}
+
+for _, kf_id, _ in ba_observations:
+    kf_obs_count[kf_id] = kf_obs_count.get(kf_id, 0) + 1
+
+print("Observations per KeyFrame:")
+
+for kf in test_keyframes:
+
+    count = kf_obs_count.get(kf.id, 0)
+
+    print(f"KF {kf.id}: {count}")
+
+print("-" * 100)
+
+print(f"Observations / KeyFrame = {len(ba_observations) / len(optimized_keyframes):.2f}")
+
+print(f"Observations / MapPoint = {len(ba_observations) / len(optimized_map_points):.2f}")
+
+print("-" * 100)
+
+# =====================================================================
+# 5. Анализ residual ДО Bundle Adjustment
+# =====================================================================
 
 residuals_before = build_residual_vector(
     ba_observations,
@@ -911,21 +1256,112 @@ print("Max abs residual:",
 
 print("-" * 100)
 
+# =====================================================================
+# 6. Сохраняем исходные позы камер
+# =====================================================================
+
+kf_before = {}
+
+for kf in test_keyframes:
+    kf_before[kf.id] = {
+        "R": kf.R.copy(),
+        "t": kf.t.copy()
+    }
+
+print("-" * 100)
+
+# =====================================================================
+# 7. Упаковка параметров Bundle Adjustment
+# =====================================================================
+
+packed_keyframe_parameters = pack_keyframe_parameters(
+    optimized_keyframes
+)
+
+packed_mappoint_parameters = pack_mappoint_parameters(
+    optimized_map_points
+)
+
+# объединяем всё в один параметр-вектор
+packed_parameters = pack_all_parameters(
+    packed_keyframe_parameters,
+    packed_mappoint_parameters
+)
+
+# =====================================================================
+# 8. Строим маску разреженного Jacobian
+# =====================================================================
+
+jac_sparsity = build_jac_sparsity(
+    ba_observations,
+    optimized_keyframes,
+    optimized_map_points
+)
+
+# =====================================================================
+# 9. Диагностическая информация
+# =====================================================================
+
+print("Bundle Adjustment statistics")
+
+print(f"Observations:       {len(ba_observations)}")
+print(f"Optimized KeyFrames:{len(optimized_keyframes)}")
+print(f"Optimized MapPoints:{len(optimized_map_points)}")
+
+print(
+    f"Optimization parameters: "
+    f"{(len(optimized_keyframes)-1) * 6 + len(optimized_map_points) * 3}"
+)
+
+print("-" * 100)
+
+thresholds = [5, 10, 20, 50, 100, 500, 1000, 5000]
+
+for t in thresholds:
+    count = np.sum(np.abs(residuals_before) > t)
+    print(f"Residual > {t:5}: {count}")
+
+print("-" * 100)
+
+# =====================================================================
+# 10. Запуск Bundle Adjustment
+# =====================================================================
 
 result = least_squares(
     ba_residuals,
-    pack_mappoint_parameters(test_map_points),
-    args=(ba_observations, test_map_points, idx_to_mp, idx_to_kf, K),
+    packed_parameters,
+    args=(
+        ba_observations,
+        optimized_keyframes,
+        optimized_map_points,
+        idx_to_mp,
+        idx_to_kf,
+        K
+    ),
     loss='huber',
     f_scale=5.0,
     method='trf',
+    jac_sparsity=jac_sparsity,
+    max_nfev=500,
+    ftol=1e-6,
+    xtol=1e-6,
+    gtol=1e-6,
     verbose=2
 )
 
-unpack_mappoint_parameters(
+# =====================================================================
+# 11. Распаковка оптимизированных параметров
+# =====================================================================
+
+unpack_all_parameters(
     result.x,
-    test_map_points
+    optimized_keyframes,
+    optimized_map_points
 )
+
+# =====================================================================
+# 12. Анализ residual ПОСЛЕ Bundle Adjustment
+# =====================================================================
 
 residuals_after = build_residual_vector(
     ba_observations,
@@ -933,6 +1369,8 @@ residuals_after = build_residual_vector(
     idx_to_kf,
     K
 )
+
+print("-" * 100)
 
 print("\n=== AFTER BA ===")
 
@@ -945,6 +1383,52 @@ print("Median abs residual:",
 print("Max abs residual:",
       np.max(np.abs(residuals_after)))
 
+print("-" * 100)
 
-cap.release()
-cv.destroyAllWindows()
+# =====================================================================
+# 13. Анализ смещения камер
+# =====================================================================
+
+max_shift = 0
+max_kf_id = None
+
+for kf in test_keyframes:
+
+    old_t = kf_before[kf.id]["t"]
+    new_t = kf.t
+
+    translation_shift = np.linalg.norm(
+        new_t - old_t
+    )
+
+    print(
+        f"KF {kf.id}: "
+        f"translation shift = {translation_shift:.6f}"
+    )
+
+    if translation_shift > max_shift:
+        max_shift = translation_shift
+        max_kf_id = kf.id
+
+print("-" * 100)
+
+print(
+    f"Max camera shift: KF {max_kf_id}, "
+    f"shift = {max_shift:.6f}"
+)
+
+# =====================================================================
+# 14. Итоговая информация об оптимизации
+# =====================================================================
+
+print("-" * 100)
+
+print("Bundle Adjustment result")
+
+print("Success:", result.success)
+print("Message:", result.message)
+print("Final cost:", result.cost)
+print("Optimality:", result.optimality)
+print("Function evaluations:", result.nfev)
+
+print("-" * 100)
