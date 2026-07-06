@@ -497,7 +497,7 @@ def ba_residuals(
 # ------------------------------------------------------------------------------------------------------------------------------------
 def build_jac_sparsity(ba_observations, optimized_keyframes, optimized_map_points):
 
-    free_keyframes = optimized_keyframes[1:]        # <-- только свободные keyframes
+    free_keyframes = optimized_keyframes[1:]
 
     n_residuals = len(ba_observations) * 2
     n_kf_params = len(free_keyframes) * 6
@@ -676,7 +676,9 @@ def cleanup_ba_graph(
     min_kf_observations=10,
     max_initial_residual=50,
 ):
-    keyframes = fixed_keyframe  # рабочий список, будет обновляться каждую итерацию
+    # рабочий список, будет обновляться каждую итерацию
+    keyframes = fixed_keyframe
+
     fixed_keyframe_id = keyframes[0].id
     iteration = 0
 
@@ -692,7 +694,7 @@ def cleanup_ba_graph(
 
         old_counts = (
             len(map_points),
-            len(keyframes)          # <-- теперь берём актуальное значение с прошлой итерации
+            len(keyframes)
         )
 
         observations = collect_and_filter_observations(
@@ -710,7 +712,7 @@ def cleanup_ba_graph(
         )
 
         keyframes = filter_keyframes_by_observations(
-            keyframes, observations, fixed_keyframe_id, min_kf_observations   # <-- фильтруем от текущего keyframes, а не от исходного
+            keyframes, observations, fixed_keyframe_id, min_kf_observations
         )
 
         observations = filter_observations(
@@ -741,6 +743,8 @@ def cleanup_ba_graph(
 
 # захват видео --------------------------------------------------------------------------------------------------------------------------------
 cap = cv.VideoCapture(0)
+if not cap.isOpened():
+    raise RuntimeError("Cannot open camera")
 
 # создание ORB и BFMatcher для поиска feature matching ----------------------------------------------------------------------------------------
 orb = cv.ORB_create(nfeatures=1000)
@@ -905,6 +909,18 @@ while True:
                 K
             )
 
+# фильтруем точки pts1 и pts2 по pose_mask -----------------------------------------------------------------------------------------------------
+            pose_mask = pose_mask.ravel() > 0
+
+            pts1 = pts1[pose_mask]
+            pts2 = pts2[pose_mask]
+
+            valid_descriptors = valid_descriptors[pose_mask]
+            valid_kp_idxes = valid_kp_idxes[pose_mask]
+
+            if len(pts1) < 8:
+                continue
+
 # обновляем глобальное перемещение камеры в мире -------------------------------------------------------------------------------------------------
             #global_t = global_t + global_R @ t - так неправильно
             global_t = global_t - global_R @ R.T @ t
@@ -940,7 +956,7 @@ while True:
                 points_4d[:3] / points_4d[3]
             ).T
 
-            # не забываем фильтровать плохие Map Points (все точки что np.isnan(), np.isinf(), а также где z < 0 и z > 1000)
+            # не забываем фильтровать плохие Map Points (все точки что np.isnan(), np.isinf(), а также где z < 0 и z > 100)
             valid_mask = (
                 np.isfinite(points_3d_prev_frame).all(axis=1)
                 &
@@ -951,14 +967,37 @@ while True:
 
             points_3d_prev_frame = points_3d_prev_frame[valid_mask]
 
-            # переводим точки Pc в систему current_frame
-            points_3d_current = (R @ points_3d_prev_frame.T + t).T
-
             # не забываем удалять и дескрипторы отфильтрованных плохих Map Points
             valid_descriptors = valid_descriptors[valid_mask]
 
             # не забываем удалять и индексы отфильтрованных плохих Map Points
             valid_kp_idxes = valid_kp_idxes[valid_mask]
+
+            if len(points_3d_prev_frame) == 0:
+                continue
+
+            # переводим точки Pc в систему current_frame
+            points_3d_current = (R @ points_3d_prev_frame.T + t).T
+
+            # проверяем, что точки находятся перед второй камерой
+            current_depth_mask = (
+                np.isfinite(points_3d_current).all(axis=1)
+                &
+                (points_3d_current[:, 2] > 0)
+                &
+                (points_3d_current[:, 2] < 100)
+            )
+
+            # применяем current_depth_mask ко всем точкам, дескрипторам и keypoint индексам
+            points_3d_prev_frame = points_3d_prev_frame[current_depth_mask]
+            points_3d_current = points_3d_current[current_depth_mask]
+
+            valid_descriptors = valid_descriptors[current_depth_mask]
+            valid_kp_idxes = valid_kp_idxes[current_depth_mask]
+
+            if len(points_3d_current) == 0:
+                continue
+
 
             # переводим Pc в Pw, используя формулу: Pw = global_R @ Pc + global_t (Но для массива точек она немного другая, как видно ниже) !УПРОЩЕНИЕ!
             points_world = (global_R @ points_3d_current.T + global_t).T
