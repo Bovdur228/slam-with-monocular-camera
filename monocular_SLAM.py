@@ -2,6 +2,8 @@ import cv2 as cv
 import numpy as np
 import os
 
+from collections import Counter
+
 from scipy.optimize import least_squares
 from scipy.sparse import lil_matrix
 
@@ -132,9 +134,16 @@ def create_KeyFrame(
     )
     kf.id = keyframe_id
 
+    seen_mappoint_ids = set()
+
     # сохраняем в текущий keyframe все точки, которые он увидел в кадре
-    for mp, valid_kp_idx, in current_frame_map_points:
-                    
+    for mp, valid_kp_idx in current_frame_map_points:
+
+        if mp.id in seen_mappoint_ids:
+            continue
+
+        seen_mappoint_ids.add(mp.id)
+
         obs = Observation(
             kf,
             valid_kp_idx
@@ -599,19 +608,22 @@ def filter_mappoints_by_observations(
     min_observations=3
 ):
     """
-    Удаляет MapPoints, которые после всех фильтраций
-    имеют слишком мало наблюдений.
+    Удаляет MapPoints, которые наблюдались
+    меньше чем в min_observations уникальных KeyFrames.
     """
 
-    mp_obs_count = {}
+    mp_to_keyframes = {}
 
-    for mp_id, _, _ in ba_observations:
-        mp_obs_count[mp_id] = mp_obs_count.get(mp_id, 0) + 1
+    for mp_id, kf_id, _ in ba_observations:
+        if mp_id not in mp_to_keyframes:
+            mp_to_keyframes[mp_id] = set()
+
+        mp_to_keyframes[mp_id].add(kf_id)
 
     filtered_points = [
         mp
         for mp in map_points
-        if mp_obs_count.get(mp.id, 0) >= min_observations
+        if len(mp_to_keyframes.get(mp.id, set())) >= min_observations
     ]
 
     return filtered_points
@@ -624,20 +636,23 @@ def filter_keyframes_by_observations(
     min_observations=10
 ):
     """
-    Удаляет KeyFrames,
-    имеющие слишком мало наблюдений.
+    Удаляет KeyFrames, которые видят слишком мало
+    уникальных MapPoints.
     """
 
-    kf_obs_count = {}
+    kf_to_mappoints = {}
 
-    for _, kf_id, _ in ba_observations:
-        kf_obs_count[kf_id] = kf_obs_count.get(kf_id, 0) + 1
+    for mp_id, kf_id, _ in ba_observations:
+        if kf_id not in kf_to_mappoints:
+            kf_to_mappoints[kf_id] = set()
+
+        kf_to_mappoints[kf_id].add(mp_id)
 
     filtered_keyframes = [
         kf
         for kf in keyframes
         if kf.id == fixed_keyframe_id
-        or kf_obs_count.get(kf.id, 0) >= min_observations
+        or len(kf_to_mappoints.get(kf.id, set())) >= min_observations
     ]
 
     return filtered_keyframes
@@ -668,60 +683,347 @@ def filter_observations(
     return filtered_observations
 
 # ---------------------------------------------------------------------------------------------------------------------------------
+def deduplicate_observations(
+    ba_observations
+):
+    """
+    Оставляет максимум одно observation для пары:
+        (MapPoint, KeyFrame)
+
+    Если одна MapPoint несколько раз наблюдалась в одном KeyFrame,
+    оставляется первое observation.
+    """
+
+    seen_pairs = set()
+    unique_observations = []
+
+    for mp_id, kf_id, observed_uv in ba_observations:
+
+        pair = (mp_id, kf_id)
+
+        if pair in seen_pairs:
+            continue
+
+        seen_pairs.add(pair)
+
+        unique_observations.append(
+            (mp_id, kf_id, observed_uv)
+        )
+
+    return unique_observations
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def collect_clean_observations_for_graph(
+    map_points,
+    keyframes,
+    K,
+    max_initial_residual=50.0
+):
+    observations = collect_and_filter_observations(
+        map_points,
+        K,
+        max_initial_residual
+    )
+
+    observations = filter_observations(
+        observations,
+        map_points,
+        keyframes
+    )
+
+    observations = deduplicate_observations(
+        observations
+    )
+
+    return observations
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def print_count_distribution(
+    counts,
+    title
+):
+    """
+    Печатает распределение количества наблюдений.
+
+    counts — список чисел, например:
+        [len(mp.observations) for mp in map_points]
+
+    Используется для диагностики:
+        - сколько MapPoints имеют 0 observations
+        - сколько имеют 1 observation
+        - сколько имеют 2
+        - сколько имеют 3+
+    """
+
+    print("-" * 100)
+    print(title)
+
+    if len(counts) == 0:
+        print("No items.")
+        return
+
+    counter = Counter(counts)
+
+    total = len(counts)
+
+    zero = counter.get(0, 0)
+    one = counter.get(1, 0)
+    two = counter.get(2, 0)
+    three = counter.get(3, 0)
+
+    four_to_five = sum(
+        value
+        for count, value in counter.items()
+        if 4 <= count <= 5
+    )
+
+    six_to_ten = sum(
+        value
+        for count, value in counter.items()
+        if 6 <= count <= 10
+    )
+
+    more_than_ten = sum(
+        value
+        for count, value in counter.items()
+        if count > 10
+    )
+
+    print(f"Total items:        {total}")
+    print(f"Mean count:         {np.mean(counts):.2f}")
+    print(f"Median count:       {np.median(counts):.2f}")
+    print(f"Max count:          {np.max(counts)}")
+
+    print("-" * 100)
+
+    print(f"0 observations:     {zero}")
+    print(f"1 observation:      {one}")
+    print(f"2 observations:     {two}")
+    print(f"3 observations:     {three}")
+    print(f"4-5 observations:   {four_to_five}")
+    print(f"6-10 observations:  {six_to_ten}")
+    print(f">10 observations:   {more_than_ten}")
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def print_ba_graph_diagnostics(
+    map_points,
+    keyframes,
+    K,
+    max_initial_residual=50.0,
+    title="BA Graph Diagnostics"
+):
+    """
+    Диагностирует качество BA-графа.
+
+    Показывает:
+        1. Сколько raw observations есть у MapPoints.
+        2. Сколько observations приходится на KeyFrames.
+        3. Сколько observations проходят projection check.
+        4. Сколько observations проходят reprojection error filter.
+        5. Распределение clean observations по MapPoints и KeyFrames.
+    """
+
+    print("=" * 100)
+    print(title)
+    print("=" * 100)
+
+    print(f"MapPoints: {len(map_points)}")
+    print(f"KeyFrames: {len(keyframes)}")
+
+    # ------------------------------------------------------------------
+    # 1. Raw observations per MapPoint
+    # ------------------------------------------------------------------
+
+    raw_mp_counts = [
+        len(mp.observations)
+        for mp in map_points
+    ]
+
+    print_count_distribution(
+        raw_mp_counts,
+        "Raw observations per MapPoint"
+    )
+
+    # ------------------------------------------------------------------
+    # 2. Raw observations per selected KeyFrame
+    # ------------------------------------------------------------------
+
+    keyframe_ids = {
+        kf.id
+        for kf in keyframes
+    }
+
+    raw_kf_counts = {
+        kf.id: 0
+        for kf in keyframes
+    }
+
+    for mp in map_points:
+        for obs in mp.observations:
+
+            kf_id = obs.keyframe.id
+
+            if kf_id in keyframe_ids:
+                raw_kf_counts[kf_id] += 1
+
+    print_count_distribution(
+        list(raw_kf_counts.values()),
+        "Raw observations per selected KeyFrame"
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Observations after projection check
+    # ------------------------------------------------------------------
+
+    ba_observations = collect_ba_observations(
+        map_points,
+        K
+    )
+
+    print("-" * 100)
+    print(f"collect_ba_observations: {len(ba_observations)}")
+
+    # ------------------------------------------------------------------
+    # 4. Observations after reprojection error filter
+    # ------------------------------------------------------------------
+
+    clean_observations = collect_and_filter_observations(
+        map_points,
+        K,
+        max_initial_residual
+    )
+
+    print(
+        f"collect_and_filter_observations "
+        f"(max residual {max_initial_residual}): "
+        f"{len(clean_observations)}"
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Clean observations per MapPoint
+    # ------------------------------------------------------------------
+
+    clean_mp_counts = {
+        mp.id: 0
+        for mp in map_points
+    }
+
+    for mp_id, _, _ in clean_observations:
+        if mp_id in clean_mp_counts:
+            clean_mp_counts[mp_id] += 1
+
+    print_count_distribution(
+        list(clean_mp_counts.values()),
+        "Clean BA observations per MapPoint"
+    )
+
+    # ------------------------------------------------------------------
+    # 6. Clean observations per selected KeyFrame
+    # ------------------------------------------------------------------
+
+    clean_kf_counts = {
+        kf.id: 0
+        for kf in keyframes
+    }
+
+    for _, kf_id, _ in clean_observations:
+        if kf_id in clean_kf_counts:
+            clean_kf_counts[kf_id] += 1
+
+    print_count_distribution(
+        list(clean_kf_counts.values()),
+        "Clean BA observations per selected KeyFrame"
+    )
+
+    print("=" * 100)
+
+# ---------------------------------------------------------------------------------------------------------------------------------
 def cleanup_ba_graph(
     fixed_keyframe,
     map_points,
     K,
-    min_mp_observations=3,
-    min_kf_observations=10,
+    min_mp_observations=2, # временные значения, потом возможно исправить
+    min_kf_observations=5, # временные значения, потом возможно исправить
     max_initial_residual=50,
+    max_iterations=20
 ):
-    # рабочий список, будет обновляться каждую итерацию
-    keyframes = fixed_keyframe
+    keyframes = list(fixed_keyframe)
+    map_points = list(map_points)
 
     fixed_keyframe_id = keyframes[0].id
-    iteration = 0
+    observations = []
 
-    while True:
+    for iteration in range(1, max_iterations + 1):
 
-        iteration += 1
+        old_counts = (
+            len(map_points),
+            len(keyframes),
+            len(observations)
+        )
 
         print(
             f"Before Iteration {iteration}: "
             f"{len(keyframes)} KFs, "
             f"{len(map_points)} MPs, "
+            f"{len(observations)} observations"
         )
-
-        old_counts = (
-            len(map_points),
-            len(keyframes)
-        )
-
-        observations = collect_and_filter_observations(
-            map_points, K, max_initial_residual
-        )
-        print(f"{len(observations)} observations")
         print("-" * 100)
 
+        # 1. Собираем observations только внутри текущего графа
+        observations = collect_clean_observations_for_graph(
+            map_points,
+            keyframes,
+            K,
+            max_initial_residual
+        )
+
+        # 2. Удаляем слабые MapPoints
         map_points = filter_mappoints_by_observations(
-            map_points, observations, min_mp_observations
+            map_points,
+            observations,
+            min_mp_observations
         )
 
-        observations = collect_and_filter_observations(
-            map_points, K, max_initial_residual
+        observations = collect_clean_observations_for_graph(
+            map_points,
+            keyframes,
+            K,
+            max_initial_residual
         )
 
+        # 3. Удаляем слабые KeyFrames, но сохраняем fixed
         keyframes = filter_keyframes_by_observations(
-            keyframes, observations, fixed_keyframe_id, min_kf_observations
+            keyframes,
+            observations,
+            fixed_keyframe_id,
+            min_kf_observations
         )
 
-        observations = filter_observations(
-            observations, map_points, keyframes
+        observations = collect_clean_observations_for_graph(
+            map_points,
+            keyframes,
+            K,
+            max_initial_residual
+        )
+
+        # 4. После удаления KeyFrames снова удаляем MapPoints, которые потеряли observations
+        map_points = filter_mappoints_by_observations(
+            map_points,
+            observations,
+            min_mp_observations
+        )
+
+        observations = collect_clean_observations_for_graph(
+            map_points,
+            keyframes,
+            K,
+            max_initial_residual
         )
 
         new_counts = (
             len(map_points),
-            len(keyframes)
+            len(keyframes),
+            len(observations)
         )
 
         print(
@@ -735,7 +1037,13 @@ def cleanup_ba_graph(
         if old_counts == new_counts:
             break
 
-    idx_to_mp, idx_to_kf = build_ba_indices(map_points, keyframes)
+    else:
+        print("cleanup_ba_graph: reached max_iterations without full convergence.")
+
+    idx_to_mp, idx_to_kf = build_ba_indices(
+        map_points,
+        keyframes
+    )
 
     return keyframes, map_points, observations, idx_to_mp, idx_to_kf
 
@@ -1226,6 +1534,15 @@ test_map_points = [
     if any(obs.keyframe.id in test_kf_ids for obs in mp.observations)
 ]
 
+print_ba_graph_diagnostics(
+    test_map_points,
+    test_keyframes,
+    K,
+    max_initial_residual=50,
+    title="BEFORE cleanup_ba_graph"
+)
+print("-" * 100)
+
 # =====================================================================
 # 3. Build clean BA graph
 # =====================================================================
@@ -1243,6 +1560,15 @@ if not ba_observations or not optimized_keyframes or not optimized_map_points:
     print("BA граф пуст после cleanup — недостаточно наблюдений для оптимизации.")
     print(f"KFs: {len(optimized_keyframes)}, MPs: {len(optimized_map_points)}, Obs: {len(ba_observations)}")
     exit()
+
+print_ba_graph_diagnostics(
+    optimized_map_points,
+    optimized_keyframes,
+    K,
+    max_initial_residual=50,
+    title="AFTER cleanup_ba_graph"
+)
+print("-" * 100)
 
 # =====================================================================
 # 4. Печатаем статистику
