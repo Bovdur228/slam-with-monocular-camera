@@ -180,6 +180,153 @@ def project_point(
 
     return np.array([u,v])
 
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def is_inside_image(
+    uv,
+    width,
+    height,
+    margin=20
+):
+    """
+    Проверяет, находится ли projected point внутри изображения.
+
+    margin нужен, чтобы не использовать точки слишком близко к краям,
+    где matching обычно менее стабилен.
+    """
+
+    u, v = uv
+
+    return (
+        margin <= u < width - margin
+        and margin <= v < height - margin
+    )
+
+# ------------------------------------------------------------------------------------------------------------------------------------------
+def track_existing_mappoints(
+    kp,
+    des,
+    map_points,
+    global_R,
+    global_t,
+    K,
+    image_shape,
+    search_radius=40,
+    descriptor_threshold=50,
+    max_points=3000
+):
+    """
+    Пытается найти уже существующие MapPoints в текущем кадре.
+
+    Логика:
+        1. Берём существующую MapPoint.
+        2. Проецируем её в текущий кадр через project_point().
+        3. Если проекция попала в изображение, ищем рядом ORB keypoints.
+        4. Среди близких keypoints выбираем тот, у которого descriptor
+           наиболее похож на descriptor MapPoint.
+        5. return возвращает список два результата:
+               1) список найденных MapPoints: [(MapPoint, keypoint_idx), ...]
+               2) результат действия функции
+    """
+
+    if des is None or len(kp) == 0 or len(map_points) == 0:
+        return [], {
+            "projected": 0,
+            "inside": 0,
+            "tracked": 0
+        }
+
+    height, width = image_shape[:2]
+
+    tracked_map_points = []
+
+    used_kp_idxes = set()
+    used_mp_ids = set()
+
+    projected_count = 0
+    inside_count = 0
+
+    kp_points = np.array(
+        [keypoint.pt for keypoint in kp],
+        dtype=np.float32
+    )
+
+    candidate_map_points = map_points[-max_points:]
+
+    for mp in candidate_map_points:
+
+        if mp.descriptor is None:
+            continue
+
+        projected_uv = project_point(
+            mp.position,
+            global_R,
+            global_t,
+            K
+        )
+
+        if projected_uv is None:
+            continue
+
+        projected_count += 1
+
+        if not is_inside_image(
+            projected_uv,
+            width,
+            height
+        ):
+            continue
+
+        inside_count += 1
+
+        distances_2d = np.linalg.norm(
+            kp_points - projected_uv.reshape(1, 2),
+            axis=1
+        )
+
+        nearby_kp_idxes = np.where(
+            distances_2d < search_radius
+        )[0]
+
+        best_kp_idx = None
+        best_descriptor_distance = float("inf")
+
+        for kp_idx in nearby_kp_idxes:
+
+            kp_idx = int(kp_idx)
+
+            if kp_idx in used_kp_idxes:
+                continue
+
+            descriptor_distance = cv.norm(
+                mp.descriptor,
+                des[kp_idx],
+                cv.NORM_HAMMING
+            )
+
+            if descriptor_distance < best_descriptor_distance:
+                best_descriptor_distance = descriptor_distance
+                best_kp_idx = kp_idx
+
+        if (
+            best_kp_idx is not None
+            and best_descriptor_distance < descriptor_threshold
+            and mp.id not in used_mp_ids
+        ):
+            tracked_map_points.append(
+                (mp, best_kp_idx)
+            )
+
+            used_kp_idxes.add(best_kp_idx)
+            used_mp_ids.add(mp.id)
+
+    stats = {
+        "projected": projected_count,
+        "inside": inside_count,
+        "tracked": len(tracked_map_points)
+    }
+
+    return tracked_map_points, stats
+
 # ------------------------------------------------------------------------------------------------------------------------------------------------
 def reprojection_error(
     point_world,
@@ -423,8 +570,7 @@ def pack_keyframe_parameters(keyframes):
 # ------------------------------------------------------------------------------------------------------------------------------------------
 def unpack_keyframe_parameters(packed, keyframes):
     """
-    keyframes[0] остаётся нетронутым (anchor).
-    Распаковываем начиная с keyframes[1].
+    Распаковывает ВСЕ keyframes, КРОМЕ первого (он — fixed/anchor).
     """
     for i, kf in enumerate(keyframes[1:]):
         rvec = packed[i*6 : i*6 + 3]
@@ -1180,6 +1326,13 @@ while True:
             current_frame_kp_idxes
         )
 
+        # результат по дефолту (временное название) 
+        tracking_stats = {
+            "projected": 0,
+            "inside": 0,
+            "tracked": 0
+        }
+
 # если между двумя кадрами нашли 8 или более matches, то вычисляем по ним Essential matrix (E) --------------------------------------------------
         if len(pts1) >= 8:
 
@@ -1233,6 +1386,33 @@ while True:
             #global_t = global_t + global_R @ t - так неправильно
             global_t = global_t - global_R @ R.T @ t
             global_R = global_R @ R.T
+
+# track already existing MapPoints in the current frame----------------------------------------------------------------------------------------
+            tracked_map_points, tracking_stats = track_existing_mappoints(
+                kp,
+                des,
+                map_points,
+                global_R,
+                global_t,
+                K,
+                gray.shape,
+                search_radius=40,
+                descriptor_threshold=50,
+                max_points=3000
+            )
+
+            # список tracked MapPoints, которые попали в этот кадр
+            current_frame_map_points = list(tracked_map_points)
+
+            used_mappoint_ids = {
+                mp.id
+                for mp, _ in current_frame_map_points
+            }
+
+            used_kp_idxes = {
+                kp_idx
+                for _, kp_idx in current_frame_map_points
+            }
 
 # # строим две Projection Matrix для текущей пары кадров (prev_frame и current_frame) ------------------------------------------------------------
             P1 = K @ np.hstack(
@@ -1329,14 +1509,14 @@ while True:
 
 # критерии оценки новых и уже существующих Map Points, чтобы не добавлять дубликаты в список map_points -------------------------------------------
 
-            # список, в который сохраняем все Map Points, которые мы увидели в кадре
-            current_frame_map_points = []
-
             # счётчик найденных новых Map Points, увеличиваем его каждый раз, если находим новую Map Point
             new_points_count = 0
 
             # проходимся в каждой найденной в кадре Map Point и её дескриптору
             for obs in frame_observations:
+
+                if obs.kp_idx in used_kp_idxes:
+                    continue
 
                 existing_mp = find_existing_mappoint(
                     obs.descriptor,
@@ -1346,6 +1526,9 @@ while True:
 
                 # если такая Map Point в мире уже существует, то не создаём новую Map Point
                 if existing_mp is not None:
+
+                    if existing_mp.id in used_mappoint_ids:
+                        continue
                     
                     # ВРЕМЕННЫЙ КОСТЫЛЬ, ВМЕСТО BUNDLE ADJUSTMENT! После каждого нового наблюдения точки, проводим статистическое усреднение её позиции
                     existing_mp.position = (existing_mp.position * existing_mp.num_observations + obs.point_world) / (
@@ -1359,6 +1542,9 @@ while True:
 
                     current_frame_map_points.append((existing_mp, obs.kp_idx))
 
+                    used_mappoint_ids.add(existing_mp.id)
+                    used_kp_idxes.add(obs.kp_idx)
+
                 # а если не существует, то создаём новый объект класса MapPoint и добавляем её в map_points[]
                 else:
 
@@ -1368,12 +1554,16 @@ while True:
                         obs.point_world,
                         obs.descriptor
                     )
+
                     mp.id = map_point_id
                     map_point_id += 1
 
                     map_points.append(mp)
 
                     current_frame_map_points.append((mp, obs.kp_idx))
+
+                    used_mappoint_ids.add(mp.id)
+                    used_kp_idxes.add(obs.kp_idx)
             
             # считаем долю новых Map Points среди всех замеченных в кадре Map Points
             if len(current_frame_map_points) != 0:
@@ -1431,7 +1621,7 @@ while True:
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
 
-                    #print(f"Keyframe saved: {len(keyframes)}")
+                    print(f"Keyframe saved: {len(keyframes)}")
                     #print(len(map_points))
 
 # рисуем 2D карту мира (вид сверху) --------------------------------------------------------------------------------------------------------------
@@ -1519,8 +1709,12 @@ print("=" * 100)
 
 test_keyframes = keyframes[:30]
 
-fixed_keyframe = test_keyframes[0]
+if len(test_keyframes) < 2:
+    print("Слишком мало KeyFrames для BA.")
+    print(f"KeyFrames: {len(test_keyframes)}")
+    exit()
 
+fixed_keyframe = test_keyframes[0]
 candidate_keyframes = test_keyframes[1:]
 
 # =====================================================================
