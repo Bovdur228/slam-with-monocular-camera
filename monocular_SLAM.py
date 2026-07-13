@@ -78,13 +78,19 @@ class FrameObservation:
 
 
 # функции =======================================================================================================================================
-
 def find_existing_mappoint(
     descriptor,
-    map_points,
+    candidate_map_points,
     threshold=30
 ):
     """
+    Ищет похожую MapPoint среди заранее выбранных кандидатов.
+
+    Важно:
+    candidate_map_points должен быть не всей глобальной картой,
+    а local map / рабочим списком кандидатов.
+
+
     ищет существующую Map Point, проходясь по дескрипторам всех Map Points и сравнивая их с дескриптором "кандидата".
     если нашли, значит такая Map Point уже существует и мы возвращаем её.
     если не нашли, то значит такой Map Point на карте нет и мы возвращаем None.
@@ -93,7 +99,10 @@ def find_existing_mappoint(
     best_mp = None
     best_distance = float("inf")
 
-    for mp in map_points[-500:]: # !!!!! временное ограничение поиска для ускорения, позже заменить на пространственный индекс !!!!!
+    for mp in candidate_map_points:
+
+        if mp.descriptor is None:
+            continue
 
         distance = cv.norm(
             descriptor,
@@ -102,7 +111,6 @@ def find_existing_mappoint(
         )
 
         if distance < best_distance:
-
             best_distance = distance
             best_mp = mp
 
@@ -202,6 +210,47 @@ def is_inside_image(
     )
 
 # ------------------------------------------------------------------------------------------------------------------------------------------
+def get_local_mappoints(
+    keyframes,
+    map_points,
+    num_recent_keyframes=10,
+    fallback_max_points=3000
+):
+    """
+    Собирает local map — MapPoints, которые наблюдались
+    в последних num_recent_keyframes KeyFrames.
+
+    Если KeyFrames ещё нет, временно возвращает последние fallback_max_points
+    из общей карты.
+    """
+
+    # Если KeyFrames ещё нет, fallback на последние точки
+    if len(keyframes) == 0:
+        return list(map_points[-fallback_max_points:])
+
+    local_mappoints_by_id = {}
+
+    recent_keyframes = keyframes[-num_recent_keyframes:]
+
+    for kf in recent_keyframes:
+        for mp in kf.map_points:
+
+            if mp is None:
+                continue
+
+            if mp.id is None:
+                continue
+
+            local_mappoints_by_id[mp.id] = mp
+
+    # Если почему-то последние KeyFrames не дали точек,
+    # тоже fallback на последние точки карты
+    if len(local_mappoints_by_id) == 0:
+        return list(map_points[-fallback_max_points:])
+
+    return list(local_mappoints_by_id.values())
+
+# ------------------------------------------------------------------------------------------------------------------------------------------
 def track_existing_mappoints(
     kp,
     des,
@@ -230,6 +279,7 @@ def track_existing_mappoints(
 
     if des is None or len(kp) == 0 or len(map_points) == 0:
         return [], {
+            "candidates": 0,
             "projected": 0,
             "inside": 0,
             "tracked": 0
@@ -250,7 +300,10 @@ def track_existing_mappoints(
         dtype=np.float32
     )
 
-    candidate_map_points = map_points[-max_points:]
+    if max_points is not None and len(map_points) > max_points:
+        candidate_map_points = map_points[-max_points:]
+    else:
+        candidate_map_points = map_points
 
     for mp in candidate_map_points:
 
@@ -320,6 +373,7 @@ def track_existing_mappoints(
             used_mp_ids.add(mp.id)
 
     stats = {
+        "candidates": len(candidate_map_points),
         "projected": projected_count,
         "inside": inside_count,
         "tracked": len(tracked_map_points)
@@ -1328,6 +1382,7 @@ while True:
 
         # результат по дефолту (временное название) 
         tracking_stats = {
+            "candidates": 0,
             "projected": 0,
             "inside": 0,
             "tracked": 0
@@ -1388,17 +1443,24 @@ while True:
             global_R = global_R @ R.T
 
 # track already existing MapPoints in the current frame----------------------------------------------------------------------------------------
+            local_map_points = get_local_mappoints(
+                keyframes,
+                map_points,
+                num_recent_keyframes=10,
+                fallback_max_points=3000
+            )
+            
             tracked_map_points, tracking_stats = track_existing_mappoints(
                 kp,
                 des,
-                map_points,
+                local_map_points,
                 global_R,
                 global_t,
                 K,
                 gray.shape,
                 search_radius=40,
                 descriptor_threshold=50,
-                max_points=3000
+                max_points=None
             )
 
             # список tracked MapPoints, которые попали в этот кадр
@@ -1512,6 +1574,8 @@ while True:
             # счётчик найденных новых Map Points, увеличиваем его каждый раз, если находим новую Map Point
             new_points_count = 0
 
+            association_candidates = list(local_map_points)
+
             # проходимся в каждой найденной в кадре Map Point и её дескриптору
             for obs in frame_observations:
 
@@ -1520,7 +1584,7 @@ while True:
 
                 existing_mp = find_existing_mappoint(
                     obs.descriptor,
-                    map_points,
+                    association_candidates,
                     threshold=20
                 )
 
@@ -1564,6 +1628,8 @@ while True:
 
                     used_mappoint_ids.add(mp.id)
                     used_kp_idxes.add(obs.kp_idx)
+
+                    association_candidates.append(mp)
             
             # считаем долю новых Map Points среди всех замеченных в кадре Map Points
             if len(current_frame_map_points) != 0:
@@ -1670,6 +1736,36 @@ while True:
             (10, 30),
             cv.FONT_HERSHEY_SIMPLEX,
             1,
+            (0, 255, 0),
+            2
+        )
+
+        cv.putText(
+            draw_img,
+            f"Local MPs: {len(local_map_points)}",
+            (10, 70),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2
+        )
+
+        cv.putText(
+            draw_img,
+            f"Tracked MPs: {tracking_stats['tracked']}",
+            (10, 110),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2
+        )
+
+        cv.putText(
+            draw_img,
+            f"Proj/In: {tracking_stats['projected']}/{tracking_stats['inside']}",
+            (10, 150),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
             (0, 255, 0),
             2
         )
@@ -1929,6 +2025,14 @@ residuals_after = build_residual_vector(
     K
 )
 
+print("-" * 100)
+print("Residual thresholds AFTER BA")
+
+for t in thresholds:
+    count = np.sum(np.abs(residuals_after) > t)
+    print(f"Residual > {t:5}: {count}")
+
+# Анализ reprojection error после Bundle Adjustment
 print("-" * 100)
 
 print("\n=== AFTER BA ===")
