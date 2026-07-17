@@ -381,6 +381,249 @@ def track_existing_mappoints(
 
     return tracked_map_points, stats
 
+# -----------------------------------------------------------------------------------------------------------------------------------------
+def estimate_pose_pnp(
+    tracked_map_points,
+    kp,
+    K,
+    min_points=15,
+    min_inliers=12,
+    reprojection_error_threshold=12.0,
+    confidence=0.99,
+    iterations_count=100
+):
+    """
+    Оценивает pose текущей камеры через PnP.
+
+    Вход:
+        tracked_map_points:
+            список пар [(MapPoint, keypoint_idx), ...]
+
+        kp:
+            keypoints текущего кадра
+
+        K:
+            camera intrinsic matrix
+
+    PnP использует соответствия:
+        3D MapPoint.position в мире
+        <->
+        2D kp[keypoint_idx].pt на текущем изображении
+
+    OpenCV solvePnP возвращает Rcw/tcw:
+        Pc = Rcw @ Pw + tcw
+
+    В текущем SLAM convention нужно Rwc/twc:
+        Pw = Rwc @ Pc + twc
+    """
+
+    if len(tracked_map_points) < min_points:
+        return False, None, None, [], {
+            "points": len(tracked_map_points),
+            "inliers": 0,
+            "inlier_ratio": 0.0
+        }
+
+    object_points = []
+    image_points = []
+    valid_tracked_pairs = []
+
+    for mp, kp_idx in tracked_map_points:
+
+        if mp is None:
+            continue
+
+        if mp.position is None:
+            continue
+
+        if kp_idx < 0 or kp_idx >= len(kp):
+            continue
+
+        object_points.append(
+            np.asarray(mp.position, dtype=np.float32).reshape(3)
+        )
+
+        image_points.append(
+            np.asarray(kp[kp_idx].pt, dtype=np.float32).reshape(2)
+        )
+
+        valid_tracked_pairs.append(
+            (mp, kp_idx)
+        )
+
+    if len(object_points) < min_points:
+        return False, None, None, [], {
+            "points": len(object_points),
+            "inliers": 0,
+            "inlier_ratio": 0.0
+        }
+
+    object_points = np.asarray(
+        object_points,
+        dtype=np.float32
+    ).reshape(-1, 1, 3)
+
+    image_points = np.asarray(
+        image_points,
+        dtype=np.float32
+    ).reshape(-1, 1, 2)
+
+    success, rvec, tvec, inliers = cv.solvePnPRansac(
+        object_points,
+        image_points,
+        K,
+        None,
+        iterationsCount=iterations_count,
+        reprojectionError=reprojection_error_threshold,
+        confidence=confidence,
+        flags=cv.SOLVEPNP_ITERATIVE
+    )
+
+    if not success or inliers is None:
+        return False, None, None, [], {
+            "points": len(object_points),
+            "inliers": 0,
+            "inlier_ratio": 0.0
+        }
+
+    inlier_indices = inliers.ravel().astype(int)
+
+    if len(inlier_indices) < min_inliers:
+        return False, None, None, [], {
+            "points": len(object_points),
+            "inliers": len(inlier_indices),
+            "inlier_ratio": len(inlier_indices) / len(object_points)
+        }
+
+    # OpenCV pose: world -> camera
+    Rcw, _ = cv.Rodrigues(rvec)
+    tcw = tvec.reshape(3, 1)
+
+    # Конвертируем в нашу SLAM convention: camera -> world
+    Rwc = Rcw.T
+    twc = -Rcw.T @ tcw
+
+    inlier_tracked_pairs = [
+        valid_tracked_pairs[i]
+        for i in inlier_indices
+    ]
+
+    pnp_stats = {
+        "points": len(object_points),
+        "inliers": len(inlier_indices),
+        "inlier_ratio": len(inlier_indices) / len(object_points)
+    }
+
+    return True, Rwc, twc, inlier_tracked_pairs, pnp_stats
+
+# ----------------------------------------------------------------------------------------------------------------------------------------
+def projection_matrix_from_pose(
+    Rwc,
+    twc,
+    K
+):
+    """
+    Создаёт projection matrix P = K @ [Rcw | tcw]
+    из нашей pose convention Rwc/twc.
+
+    У нас:
+        Pw = Rwc @ Pc + twc
+
+    Для projection нужно:
+        Pc = Rcw @ Pw + tcw
+    """
+
+    Rcw = Rwc.T
+    tcw = -Rcw @ twc
+
+    P = K @ np.hstack(
+        (
+            Rcw,
+            tcw
+        )
+    )
+
+    return P
+
+# -----------------------------------------------------------------------------------------------------------------------------------------
+def triangulate_points_world_from_poses(
+    pts1,
+    pts2,
+    prev_Rwc,
+    prev_twc,
+    curr_Rwc,
+    curr_twc,
+    K,
+    max_depth=100
+):
+    """
+    Триангулирует точки сразу в world coordinates,
+    используя global pose предыдущего и текущего кадра.
+
+    pts1 — points на предыдущем кадре
+    pts2 — points на текущем кадре
+    """
+
+    P1 = projection_matrix_from_pose(
+        prev_Rwc,
+        prev_twc,
+        K
+    )
+
+    P2 = projection_matrix_from_pose(
+        curr_Rwc,
+        curr_twc,
+        K
+    )
+
+    points_4d = cv.triangulatePoints(
+        P1,
+        P2,
+        pts1.T,
+        pts2.T
+    )
+
+    w = points_4d[3]
+
+    valid_w_mask = np.abs(w) > 1e-8
+
+    points_world = np.zeros(
+        (points_4d.shape[1], 3),
+        dtype=np.float64
+    )
+
+    points_world[valid_w_mask] = (
+        points_4d[:3, valid_w_mask] / w[valid_w_mask]
+    ).T
+
+    points_cam_prev = (
+        prev_Rwc.T @ (points_world.T - prev_twc)
+    ).T
+
+    points_cam_curr = (
+        curr_Rwc.T @ (points_world.T - curr_twc)
+    ).T
+
+    valid_mask = (
+        valid_w_mask
+        &
+        np.isfinite(points_world).all(axis=1)
+        &
+        np.isfinite(points_cam_prev).all(axis=1)
+        &
+        np.isfinite(points_cam_curr).all(axis=1)
+        &
+        (points_cam_prev[:, 2] > 0)
+        &
+        (points_cam_curr[:, 2] > 0)
+        &
+        (points_cam_prev[:, 2] < max_depth)
+        &
+        (points_cam_curr[:, 2] < max_depth)
+    )
+
+    return points_world[valid_mask], valid_mask
+
 # ------------------------------------------------------------------------------------------------------------------------------------------------
 def reprojection_error(
     point_world,
@@ -509,7 +752,7 @@ def compute_residual(
     )
 
     if predicted_uv is None:
-        return np.inf, np.inf
+        return 1e4, 1e4
     
     dx = predicted_uv[0] - observed_uv[0]
     dy = predicted_uv[1] - observed_uv[1]
@@ -1315,6 +1558,10 @@ map_point_id = 0
 # вспомогательная переменная для отрисовки Map Points на 2D карте, чтобы не рисовать каждый раз дубликаты -----------------------------------------
 last_drawn_map_point_idx = 0
 
+# счётчик PnP кадров и recoverPose кадров --------------------------------------------------------------------------------------------------
+pnp_success_count = 0
+recoverpose_count = 0
+
 
 # НАЧАЛО ЗАПИСИ ===================================================================================================================================
 while True:
@@ -1381,11 +1628,19 @@ while True:
         )
 
         # результат по дефолту (временное название) 
+        pose_source = "none"
+        local_map_points = []
+
         tracking_stats = {
             "candidates": 0,
             "projected": 0,
             "inside": 0,
-            "tracked": 0
+            "tracked": 0,
+            "tracked_before_pnp": 0,
+            "tracked_used": 0,
+            "pnp_points": 0,
+            "pnp_inliers": 0,
+            "pnp_inlier_ratio": 0.0
         }
 
 # если между двумя кадрами нашли 8 или более matches, то вычисляем по ним Essential matrix (E) --------------------------------------------------
@@ -1438,9 +1693,21 @@ while True:
                 continue
 
 # обновляем глобальное перемещение камеры в мире -------------------------------------------------------------------------------------------------
-            #global_t = global_t + global_R @ t - так неправильно
-            global_t = global_t - global_R @ R.T @ t
-            global_R = global_R @ R.T
+            # сохраняем pose предыдущего кадра
+            prev_Rwc_for_triangulation = global_R.copy()
+            prev_twc_for_triangulation = global_t.copy()
+
+            # recoverPose даёт initial estimate текущей pose
+            initial_global_R = prev_Rwc_for_triangulation @ R.T
+            initial_global_t = (
+                prev_twc_for_triangulation
+                - prev_Rwc_for_triangulation @ R.T @ t
+            )
+
+            global_R = initial_global_R.copy()
+            global_t = initial_global_t.copy()
+
+            pose_source = "recoverPose"
 
 # track already existing MapPoints in the current frame----------------------------------------------------------------------------------------
             local_map_points = get_local_mappoints(
@@ -1463,7 +1730,39 @@ while True:
                 max_points=None
             )
 
-            # список tracked MapPoints, которые попали в этот кадр
+            pnp_success, pnp_Rwc, pnp_twc, pnp_inlier_tracked_points, pnp_stats = estimate_pose_pnp(
+                tracked_map_points,
+                kp,
+                K,
+                min_points=15,
+                min_inliers=12,
+                reprojection_error_threshold=12.0,
+                confidence=0.99,
+                iterations_count=100
+            )
+
+            if pnp_success:
+                global_R = pnp_Rwc.copy()
+                global_t = pnp_twc.copy()
+
+                # оставляем только PnP-inlier tracked points, чтобы outlier matches не попали в KeyFrame observations
+                tracked_map_points = pnp_inlier_tracked_points
+
+                pose_source = "PnP"
+
+            tracking_stats["tracked_before_pnp"] = tracking_stats["tracked"]
+            tracking_stats["tracked_used"] = len(tracked_map_points)
+
+            tracking_stats["pnp_points"] = pnp_stats["points"]
+            tracking_stats["pnp_inliers"] = pnp_stats["inliers"]
+            tracking_stats["pnp_inlier_ratio"] = pnp_stats["inlier_ratio"]
+
+            if pose_source == "PnP":
+                pnp_success_count += 1
+            else:
+                recoverpose_count += 1
+
+# список tracked MapPoints, которые попали в этот кадр ----------------------------------------------------------------------------------
             current_frame_map_points = list(tracked_map_points)
 
             used_mappoint_ids = {
@@ -1476,81 +1775,23 @@ while True:
                 for _, kp_idx in current_frame_map_points
             }
 
-# # строим две Projection Matrix для текущей пары кадров (prev_frame и current_frame) ------------------------------------------------------------
-            P1 = K @ np.hstack(
-                (
-                    np.eye(3),
-                    np.zeros((3, 1))
-                )
+# триангулируем новые MapPoints сразу в мировых координатах, используя global pose предыдущего и текущего кадра --------------------------
+            points_world, triangulation_valid_mask = triangulate_points_world_from_poses(
+                pts1,
+                pts2,
+                prev_Rwc_for_triangulation,
+                prev_twc_for_triangulation,
+                global_R,
+                global_t,
+                K,
+                max_depth=100
             )
 
-            P2 = K @ np.hstack(
-                (
-                    R,
-                    t
-                )
-            )
+            valid_descriptors = valid_descriptors[triangulation_valid_mask]
+            valid_kp_idxes = valid_kp_idxes[triangulation_valid_mask]
 
-# с помощью triangulation вычисляем Map Points (Pw) ---------------------------------------------------------------------------------------------
-
-            # поначалу вычисляем !!!!!!!!!!!!!!!!!
-            points_4d = cv.triangulatePoints(
-                P1,
-                P2,
-                pts1.T,
-                pts2.T
-            )
-
-            # далее получаем точки, ОТНОСИТЕЛЬНО prev_frame, НО ПОКА ЧТО ОТНОСИТЕЛЬНО КАМЕРЫ (Pc)
-            points_3d_prev_frame = (
-                points_4d[:3] / points_4d[3]
-            ).T
-
-            # не забываем фильтровать плохие Map Points (все точки что np.isnan(), np.isinf(), а также где z < 0 и z > 100)
-            valid_mask = (
-                np.isfinite(points_3d_prev_frame).all(axis=1)
-                &
-                (points_3d_prev_frame[:, 2] > 0)
-                &
-                (points_3d_prev_frame[:, 2] < 100)
-            )
-
-            points_3d_prev_frame = points_3d_prev_frame[valid_mask]
-
-            # не забываем удалять и дескрипторы отфильтрованных плохих Map Points
-            valid_descriptors = valid_descriptors[valid_mask]
-
-            # не забываем удалять и индексы отфильтрованных плохих Map Points
-            valid_kp_idxes = valid_kp_idxes[valid_mask]
-
-            if len(points_3d_prev_frame) == 0:
+            if len(points_world) == 0:
                 continue
-
-            # переводим точки Pc в систему current_frame
-            points_3d_current = (R @ points_3d_prev_frame.T + t).T
-
-            # проверяем, что точки находятся перед второй камерой
-            current_depth_mask = (
-                np.isfinite(points_3d_current).all(axis=1)
-                &
-                (points_3d_current[:, 2] > 0)
-                &
-                (points_3d_current[:, 2] < 100)
-            )
-
-            # применяем current_depth_mask ко всем точкам, дескрипторам и keypoint индексам
-            points_3d_prev_frame = points_3d_prev_frame[current_depth_mask]
-            points_3d_current = points_3d_current[current_depth_mask]
-
-            valid_descriptors = valid_descriptors[current_depth_mask]
-            valid_kp_idxes = valid_kp_idxes[current_depth_mask]
-
-            if len(points_3d_current) == 0:
-                continue
-
-
-            # переводим Pc в Pw, используя формулу: Pw = global_R @ Pc + global_t (Но для массива точек она немного другая, как видно ниже) !УПРОЩЕНИЕ!
-            points_world = (global_R @ points_3d_current.T + global_t).T
 
 # Формирует список наблюдений текущего кадра. Для каждой точки сохраняет её мировые координаты, дескриптор и индекс соответствующего keypoint --
             frame_observations = []
@@ -1735,7 +1976,17 @@ while True:
             f"Matches: {len(matches)}",
             (10, 30),
             cv.FONT_HERSHEY_SIMPLEX,
-            1,
+            0.8,
+            (0, 255, 0),
+            2
+        )
+
+        cv.putText(
+            draw_img,
+            f"Pose: {pose_source}",
+            (10, 65),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
             (0, 255, 0),
             2
         )
@@ -1743,7 +1994,7 @@ while True:
         cv.putText(
             draw_img,
             f"Local MPs: {len(local_map_points)}",
-            (10, 70),
+            (10, 100),
             cv.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
@@ -1752,8 +2003,8 @@ while True:
 
         cv.putText(
             draw_img,
-            f"Tracked MPs: {tracking_stats['tracked']}",
-            (10, 110),
+            f"Tracked: {tracking_stats['tracked_used']}/{tracking_stats['tracked_before_pnp']}",
+            (10, 135),
             cv.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
@@ -1762,8 +2013,18 @@ while True:
 
         cv.putText(
             draw_img,
-            f"Proj/In: {tracking_stats['projected']}/{tracking_stats['inside']}",
-            (10, 150),
+            f"Projected/Inside: {tracking_stats['projected']}/{tracking_stats['inside']}",
+            (10, 170),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2
+        )
+
+        cv.putText(
+            draw_img,
+            f"PnP inliers: {tracking_stats['pnp_inliers']}/{tracking_stats['pnp_points']}",
+            (10, 205),
             cv.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 255, 0),
@@ -1798,10 +2059,13 @@ cv.destroyAllWindows()
 # ТЕСТЫ =========================================================================================================================================
 
 print("=" * 100)
-
+print(f"PnP frames: {pnp_success_count}")
+print(f"recoverPose frames: {recoverpose_count}")
 # =====================================================================
 # 1. Выбираем KeyFrames
 # =====================================================================
+
+print("-" * 100)
 
 test_keyframes = keyframes[:30]
 
@@ -2055,7 +2319,7 @@ print("-" * 100)
 max_shift = 0
 max_kf_id = None
 
-for kf in test_keyframes:
+for kf in optimized_keyframes:
 
     old_t = kf_before[kf.id]["t"]
     new_t = kf.t
