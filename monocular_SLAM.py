@@ -2,8 +2,6 @@ import cv2 as cv
 import numpy as np
 import os
 
-from scipy.optimize import least_squares
-
 import slam.config as cfg
 
 from slam.map import MapPoint, FrameObservation
@@ -22,21 +20,6 @@ from slam.triangulation import (
 
 from slam.keyframes import create_KeyFrame
 
-from slam.ba import (
-    build_residual_vector,
-    pack_mappoint_parameters,
-    pack_keyframe_parameters,
-    pack_all_parameters,
-    unpack_all_parameters,
-    ba_residuals,
-    build_jac_sparsity,
-    cleanup_ba_graph,
-)
-
-from slam.ba_diagnostics import (
-    print_ba_graph_diagnostics,
-)
-
 from slam.visualisation import (
     create_trajectory_image,
     create_map_image,
@@ -48,23 +31,10 @@ from slam.visualisation import (
 
 from slam.ba_runner import run_ba_test
 
-
-# =====================================================================================================================================
-def cull_mappoints_by_observations(
-    map_points,
-    min_observations=2
-):
-    good_points = []
-
-    for mp in map_points:
-
-        if len(mp.observations) >= min_observations:
-            good_points.append(mp)
-
-    return good_points
+from slam.culling import cull_mappoints
 
 
-# =============================================================================================================================================
+# ========================================================================================================================================
 
 # захват видео --------------------------------------------------------------------------------------------------------------------------------
 cap = cv.VideoCapture(0)
@@ -422,7 +392,8 @@ while True:
 
                     mp = MapPoint(
                         obs.point_world,
-                        obs.descriptor
+                        obs.descriptor,
+                        created_keyframe_id=keyframe_id
                     )
 
                     mp.id = map_point_id
@@ -443,6 +414,8 @@ while True:
             else:
                 new_points_ratio = 0
 
+            created_keyframe = False
+
 # критерии создания и само создание KeyFrames, сохраняем его данные (глобальные R и t камеры, keypoints и descriptors) -------------------------------
 
             # если у нас нет ни одного KeyFrame, то создаём его в любом случае
@@ -461,6 +434,8 @@ while True:
 
                 last_keyFrame_t = global_t.copy()
                 last_keyFrame_R = global_R.copy()
+
+                created_keyframe = True
 
                 #print(f"Keyframe saved: {len(keyframes)}")
                 #print(len(map_points))
@@ -500,8 +475,56 @@ while True:
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
 
+                    created_keyframe = True
+
                     print(f"Keyframe saved: {len(keyframes)}")
                     #print(len(map_points))
+            
+# Culling MapPoints ---------------------------------------------------------------------------------------------------------------------
+            if (
+                cfg.CULLING_ENABLED
+                and created_keyframe
+                and len(keyframes) % cfg.CULLING_EVERY_KEYFRAMES == 0
+                and len(map_points) >= cfg.CULLING_MIN_MAP_POINTS
+            ):
+                current_keyframe_id = keyframes[-1].id
+
+                map_points, culling_stats = cull_mappoints(
+                    map_points,
+                    keyframes,
+                    K,
+                    current_keyframe_id=current_keyframe_id,
+                    min_observations=cfg.CULLING_MIN_OBSERVATIONS,
+                    min_unique_keyframes=cfg.CULLING_MIN_UNIQUE_KEYFRAMES,
+                    max_mean_reprojection_error=cfg.CULLING_MAX_REPROJECTION_ERROR,
+                    min_age_keyframes=cfg.CULLING_MIN_AGE_KEYFRAMES
+                )
+
+                print(
+                    f"MapPoint culling: "
+                    f"{culling_stats['before']} -> {culling_stats['after']} "
+                    f"removed={culling_stats['removed']}"
+                )
+
+                print(
+                    f"Culling removal reasons: {culling_stats['removal_reasons']}"
+                )
+                
+                print(
+                    f"Culling kept reasons: {culling_stats['kept_reasons']}"
+                )
+
+                # После удаления MapPoints нужно перерисовать карту, потому что старое map_img всё ещё содержит уже удалённые точки
+                map_img = create_map_image(
+                    size=800
+                )
+
+                last_drawn_map_point_idx = draw_new_mappoints(
+                    map_img,
+                    map_points,
+                    0,
+                    origin=(400, 400)
+                )
 
 # рисуем 2D карту мира (вид сверху) --------------------------------------------------------------------------------------------------------------
 

@@ -18,7 +18,9 @@ class MapPoint:
     def __init__(
         self,
         position,
-        descriptor
+        descriptor,
+        created_keyframe_id=None
+        
     ):
 
         self.position = position
@@ -29,6 +31,10 @@ class MapPoint:
         self.num_observations = 1
 
         self.id = None
+
+        # KeyFrame ID, на основе которого была создана MapPoint.
+        # Используется в MapPoint Culling, чтобы предотвратить преждевременное удаление слишком молодых точек.
+        self.created_keyframe_id = created_keyframe_id
 
 
 # Класс, описывающий строение KeyFrame
