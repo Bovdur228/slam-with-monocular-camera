@@ -15,6 +15,9 @@ def get_keyframe_used_keypoint_indices(kf):
 
     for mp in kf.map_points:
 
+        if mp is None:
+            continue
+
         for obs in mp.observations:
 
             if obs.keyframe is kf:
@@ -103,10 +106,12 @@ def triangulate_new_mappoints_between_keyframes(
     stats = {
         "matches": 0,
         "candidate_matches": 0,
+        "ransac_inliers": 0,
         "triangulated": 0,
         "created": 0,
         "skipped_used_keypoint": 0,
         "skipped_descriptor_distance": 0,
+        "skipped_geometric_ransac": 0,
         "skipped_reprojection": 0,
         "skipped_invalid_triangulation": 0
     }
@@ -205,23 +210,35 @@ def triangulate_new_mappoints_between_keyframes(
     )
 
     if E is None or mask is None:
-        stats["skipped_geometric_ransac"] = stats.get("skipped_geometric_ransac", 0) + len(pts_reference)
+        stats["skipped_geometric_ransac"] += len(pts_reference)
         return map_point_id, stats
 
     ransac_mask = mask.ravel() == 1
 
-    if np.count_nonzero(ransac_mask) < min_ransac_inliers:
-        stats["skipped_geometric_ransac"] = stats.get("skipped_geometric_ransac", 0) + len(pts_reference)
+    ransac_inliers_count = int(
+        np.count_nonzero(ransac_mask)
+    )
+
+    stats["ransac_inliers"] = ransac_inliers_count
+
+    if ransac_inliers_count < min_ransac_inliers:
+        stats["skipped_geometric_ransac"] += len(pts_reference)
         return map_point_id, stats
 
     pts_reference = pts_reference[ransac_mask]
     pts_current = pts_current[ransac_mask]
 
-    reference_kp_idxes = np.array(reference_kp_idxes)[ransac_mask]
-    current_kp_idxes = np.array(current_kp_idxes)[ransac_mask]
-    descriptors = np.array(descriptors)[ransac_mask]
+    reference_kp_idxes = np.array(
+        reference_kp_idxes
+    )[ransac_mask]
 
-    stats["ransac_inliers"] = int(np.count_nonzero(ransac_mask))
+    current_kp_idxes = np.array(
+        current_kp_idxes
+    )[ransac_mask]
+
+    descriptors = np.array(
+        descriptors
+    )[ransac_mask]
 
     points_world, valid_mask = triangulate_points_world_from_poses(
         pts_reference,
