@@ -4,19 +4,12 @@ import os
 
 import slam.config as cfg
 
-from slam.map import MapPoint, FrameObservation
-
 from slam.tracking import (
-    find_existing_mappoint,
     get_local_mappoints,
     track_existing_mappoints,
 )
 
 from slam.pose import estimate_pose_pnp
-
-from slam.triangulation import (
-    triangulate_points_world_from_poses,
-)
 
 from slam.keyframes import create_KeyFrame
 
@@ -32,6 +25,8 @@ from slam.visualisation import (
 from slam.ba_runner import run_ba_test
 
 from slam.culling import cull_mappoints
+
+from slam.keyframe_triangulation import triangulate_new_mappoints_between_keyframes
 
 
 # ========================================================================================================================================
@@ -122,10 +117,6 @@ while True:
         pts1 = []
         pts2 = []
 
-        current_frame_kp_idxes = []
-
-        matched_descriptors = []
-
         for match in matches:
 
             pts1.append(
@@ -136,14 +127,6 @@ while True:
                 kp[match.trainIdx].pt
             )
 
-            matched_descriptors.append(
-                des[match.trainIdx]
-            )
-
-            current_frame_kp_idxes.append(
-                match.trainIdx
-            )
-
         pts1 = np.array(
             pts1,
             dtype=np.float32
@@ -152,14 +135,6 @@ while True:
         pts2 = np.array(
             pts2,
             dtype=np.float32
-        )
-
-        matched_descriptors = np.array(
-            matched_descriptors
-        )
-
-        current_frame_kp_idxes = np.array(
-            current_frame_kp_idxes
         )
 
         # результат по дефолту (временное название) 
@@ -198,11 +173,6 @@ while True:
             pts1 = pts1[mask.ravel() == 1]
             pts2 = pts2[mask.ravel() == 1]
 
-            # также после RANSAC сохраняем descriptors у оставшихся после mask хороших matches
-            valid_descriptors = matched_descriptors[mask.ravel() == 1]
-
-            valid_kp_idxes = current_frame_kp_idxes[mask.ravel() == 1]
-
             # если после RANSAC осталось меньше 8-ми хороших features, то пропускаем данный кадр
             if len(pts1) < 8:
                 continue
@@ -220,9 +190,6 @@ while True:
 
             pts1 = pts1[pose_mask]
             pts2 = pts2[pose_mask]
-
-            valid_descriptors = valid_descriptors[pose_mask]
-            valid_kp_idxes = valid_kp_idxes[pose_mask]
 
             if len(pts1) < 8:
                 continue
@@ -300,120 +267,7 @@ while True:
 # список tracked MapPoints, которые попали в этот кадр ----------------------------------------------------------------------------------
             current_frame_map_points = list(tracked_map_points)
 
-            used_mappoint_ids = {
-                mp.id
-                for mp, _ in current_frame_map_points
-            }
-
-            used_kp_idxes = {
-                kp_idx
-                for _, kp_idx in current_frame_map_points
-            }
-
-# триангулируем новые MapPoints сразу в мировых координатах, используя global pose предыдущего и текущего кадра --------------------------
-            points_world, triangulation_valid_mask = triangulate_points_world_from_poses(
-                pts1,
-                pts2,
-                prev_Rwc_for_triangulation,
-                prev_twc_for_triangulation,
-                global_R,
-                global_t,
-                K,
-                max_depth=cfg.MAX_TRIANGULATION_DEPTH
-            )
-
-            valid_descriptors = valid_descriptors[triangulation_valid_mask]
-            valid_kp_idxes = valid_kp_idxes[triangulation_valid_mask]
-
-            if len(points_world) == 0:
-                continue
-
-# Формирует список наблюдений текущего кадра. Для каждой точки сохраняет её мировые координаты, дескриптор и индекс соответствующего keypoint --
-            frame_observations = []
-
-            for point, descriptor, kp_idx in zip(
-                points_world,
-                valid_descriptors,
-                valid_kp_idxes
-            ):
-
-                frame_observations.append(
-                    FrameObservation(
-                        point,
-                        descriptor,
-                        kp_idx
-                    )
-    )
-
-# критерии оценки новых и уже существующих Map Points, чтобы не добавлять дубликаты в список map_points -------------------------------------------
-
-            # счётчик найденных новых Map Points, увеличиваем его каждый раз, если находим новую Map Point
-            new_points_count = 0
-
-            association_candidates = list(local_map_points)
-
-            # проходимся в каждой найденной в кадре Map Point и её дескриптору
-            for obs in frame_observations:
-
-                if obs.kp_idx in used_kp_idxes:
-                    continue
-
-                existing_mp = find_existing_mappoint(
-                    obs.descriptor,
-                    association_candidates,
-                    threshold=20
-                )
-
-                # если такая Map Point в мире уже существует, то не создаём новую Map Point
-                if existing_mp is not None:
-
-                    if existing_mp.id in used_mappoint_ids:
-                        continue
-                    
-                    # ВРЕМЕННЫЙ КОСТЫЛЬ, ВМЕСТО BUNDLE ADJUSTMENT! После каждого нового наблюдения точки, проводим статистическое усреднение её позиции
-                    existing_mp.position = (existing_mp.position * existing_mp.num_observations + obs.point_world) / (
-                                                    existing_mp.num_observations + 1
-                                                )
-                    
-                    existing_mp.num_observations += 1
-
-                    # ТОЖЕ ВРЕМЕННЫЙ КОСТЫЛЬ. ПОТОМ ИСПРАВИТЬ НА ОДНО ИЗ ЭТОГО: descriptor voting, медианный descriptor, лучший descriptor
-                    existing_mp.descriptor = obs.descriptor
-
-                    current_frame_map_points.append((existing_mp, obs.kp_idx))
-
-                    used_mappoint_ids.add(existing_mp.id)
-                    used_kp_idxes.add(obs.kp_idx)
-
-                # а если не существует, то создаём новый объект класса MapPoint и добавляем её в map_points[]
-                else:
-
-                    new_points_count += 1
-
-                    mp = MapPoint(
-                        obs.point_world,
-                        obs.descriptor,
-                        created_keyframe_id=keyframe_id
-                    )
-
-                    mp.id = map_point_id
-                    map_point_id += 1
-
-                    map_points.append(mp)
-
-                    current_frame_map_points.append((mp, obs.kp_idx))
-
-                    used_mappoint_ids.add(mp.id)
-                    used_kp_idxes.add(obs.kp_idx)
-
-                    association_candidates.append(mp)
-            
-            # считаем долю новых Map Points среди всех замеченных в кадре Map Points
-            if len(current_frame_map_points) != 0:
-                new_points_ratio = new_points_count / len(current_frame_map_points)
-            else:
-                new_points_ratio = 0
-
+            # ляляляляляляляляляляляляля
             created_keyframe = False
 
 # критерии создания и само создание KeyFrames, сохраняем его данные (глобальные R и t камеры, keypoints и descriptors) -------------------------------
@@ -454,12 +308,10 @@ while True:
                 # если камера достаточно далеко переместилась или повернулась, или в кадре заметили много новых Map Points, создаём новый KeyFrame
                 if (
                     translation > cfg.KEYFRAME_TRANSLATION_THRESHOLD 
-                    or rotation > cfg.KEYFRAME_ROTATION_THRESHOLD 
-                    or (
-                        new_points_ratio >= cfg.KEYFRAME_NEW_POINTS_RATIO 
-                        and len(map_points) > cfg.KEYFRAME_MIN_MAP_POINTS_FOR_NEW_POINTS_RATIO
-                        )
+                    or rotation > cfg.KEYFRAME_ROTATION_THRESHOLD
                     ):
+
+                    reference_kf = keyframes[-1]
                 
                     create_KeyFrame(
                         global_R,
@@ -470,7 +322,25 @@ while True:
                         keyframes,
                         keyframe_id
                     )
+
                     keyframe_id += 1
+
+                    current_kf = keyframes[-1]
+
+                    map_point_id, triangulation_stats = triangulate_new_mappoints_between_keyframes(
+                                                            reference_kf,
+                                                            current_kf,
+                                                            map_points,
+                                                            map_point_id,
+                                                            K,
+                                                            bf,
+                                                            ransac_threshold=cfg.KEYFRAME_TRIANGULATION_RANSAC_THRESHOLD,
+                                                            min_ransac_inliers=cfg.KEYFRAME_TRIANGULATION_MIN_RANSAC_INLIERS,
+                                                            max_depth=cfg.MAX_TRIANGULATION_DEPTH,
+                                                            max_descriptor_distance=cfg.KEYFRAME_TRIANGULATION_MATCH_DISTANCE,
+                                                            max_reprojection_error=cfg.KEYFRAME_TRIANGULATION_MAX_REPROJECTION_ERROR,
+                                                            max_new_points=cfg.KEYFRAME_TRIANGULATION_MAX_NEW_POINTS
+                                                        )
 
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
@@ -478,6 +348,7 @@ while True:
                     created_keyframe = True
 
                     print(f"Keyframe saved: {len(keyframes)}")
+                    print(f"KeyFrame triangulation: {triangulation_stats}")
                     #print(len(map_points))
             
 # Culling MapPoints ---------------------------------------------------------------------------------------------------------------------
