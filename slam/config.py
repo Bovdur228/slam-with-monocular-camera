@@ -19,7 +19,8 @@ KEYFRAME_ROTATION_THRESHOLD = 0.6
 KEYFRAME_NEW_POINTS_RATIO = 0.5
 KEYFRAME_MIN_MAP_POINTS_FOR_NEW_POINTS_RATIO = 200
 
-# MapPoint culling
+# MapPoint culling ============================================================================================================================
+
 CULLING_ENABLED = True
 CULLING_EVERY_KEYFRAMES = 5
 
@@ -30,10 +31,23 @@ CULLING_MAX_REPROJECTION_ERROR = 20.0
 CULLING_MIN_MAP_POINTS = 1000
 CULLING_MIN_AGE_KEYFRAMES = 3
 
-# KeyFrame-based triangulation
+# KeyFrame-based triangulation ================================================================================================================
+
 KEYFRAME_TRIANGULATION_MATCH_DISTANCE = 50
 KEYFRAME_TRIANGULATION_MAX_REPROJECTION_ERROR = 10.0
 KEYFRAME_TRIANGULATION_MAX_NEW_POINTS = 500
 
 KEYFRAME_TRIANGULATION_RANSAC_THRESHOLD = 1.0
 KEYFRAME_TRIANGULATION_MIN_RANSAC_INLIERS = 20
+
+# KeyFrame selection ==========================================================================================================================
+
+KEYFRAME_MIN_FRAMES_BETWEEN = 15
+
+KEYFRAME_MIN_TRACKED_POINTS = 60
+KEYFRAME_MIN_PNP_INLIER_RATIO = 0.55
+
+KEYFRAME_WEAK_TRACKING_MIN_TRANSLATION = 2.0
+KEYFRAME_WEAK_TRACKING_MIN_ROTATION = 0.15
+
+KEYFRAME_MIN_MAP_POINTS_FOR_TRACKING_CHECK = 300

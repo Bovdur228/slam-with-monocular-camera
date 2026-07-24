@@ -11,7 +11,11 @@ from slam.tracking import (
 
 from slam.pose import estimate_pose_pnp
 
-from slam.keyframes import create_KeyFrame
+from slam.keyframes import (
+    create_KeyFrame,
+    compute_keyframe_motion,
+    should_create_keyframe,
+)
 
 from slam.visualisation import (
     create_trajectory_image,
@@ -31,21 +35,21 @@ from slam.keyframe_triangulation import triangulate_new_mappoints_between_keyfra
 
 # ========================================================================================================================================
 
-# захват видео --------------------------------------------------------------------------------------------------------------------------------
+# захват видео ----------------------------------------------------------------------------------------------------------------------
 cap = cv.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("Cannot open camera")
 
-# создание ORB и BFMatcher для поиска feature matching ----------------------------------------------------------------------------------------
+# создание ORB и BFMatcher для поиска feature matching ------------------------------------------------------------------------------
 orb = cv.ORB_create(nfeatures=cfg.ORB_FEATURES)
 bf = cv.BFMatcher(cv.NORM_HAMMING, crossCheck=True)
 
-# сюда будет записываться предыдущий кадр, а также его keypoints и descriptors ----------------------------------------------------------------
+# сюда будет записываться предыдущий кадр, а также его keypoints и descriptors -----------------------------------------------------
 prev_gray = None
 prev_kp = None
 prev_des = None
 
-# матрица K и distortion, взятые после калибровки камеры из файла mono_calibration.npz --------------------------------------------------------
+# матрица K и distortion, взятые после калибровки камеры из файла mono_calibration.npz ----------------------------------------------
 calib_data = np.load(
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -57,43 +61,46 @@ K = calib_data["K"]
 dist = calib_data["dist"]
 # RMS Error: 0.13271354901396754
 
-# тут будет обновляться глобальная pose камеры ------------------------------------------------------------------------------------------------
+# тут будет обновляться глобальная pose камеры ---------------------------------------------------------------------------------------
 global_R = np.eye(3)
 global_t = np.zeros((3, 1))
 
 
-# 2D визуализация перемещения камеры в глобальном мире + место начала перемещения (cv.circle)--------------------------------------------------
+# 2D визуализация перемещения камеры в глобальном мире + место начала перемещения (cv.circle)-----------------------------------------
 traj_img = create_trajectory_image(
     size=800,
     origin=(400, 400)
 )
 
-# 2D карта, где будут показываться все Map Points мира --------------------------------------------------------------------------------------------
+# 2D карта, где будут показываться все Map Points мира -------------------------------------------------------------------------------
 map_img = create_map_image(
     size=800
 )
 
-# тут хранятится Pose последнего KeyFrame ---------------------------------------------------------------------------------------------------------
+# тут хранятится Pose последнего KeyFrame ---------------------------------------------------------------------------------------------
 last_keyFrame_t = None
 last_keyFrame_R = None
 
-# список всех созданных KeyFrames -----------------------------------------------------------------------------------------------------------------
+# список всех созданных KeyFrames ------------------------------------------------------------------------------------------------------
 keyframes = []
 keyframe_id = 0
 
-# список всех созданных Map Points ----------------------------------------------------------------------------------------------------------------
+# список всех созданных Map Points -----------------------------------------------------------------------------------------------------
 map_points = []
 map_point_id = 0
 
-# вспомогательная переменная для отрисовки Map Points на 2D карте, чтобы не рисовать каждый раз дубликаты -----------------------------------------
+# вспомогательная переменная для отрисовки Map Points на 2D карте, чтобы не рисовать каждый раз дубликаты -----------------------------
 last_drawn_map_point_idx = 0
 
-# счётчик PnP кадров и recoverPose кадров --------------------------------------------------------------------------------------------------
+# счётчик PnP кадров и recoverPose кадров ----------------------------------------------------------------------------------------------
 pnp_success_count = 0
 recoverpose_count = 0
 
+# счётчик кадров после последнего созданного Keyframe ---------------------------------------------------------------------------------
+frames_since_last_keyframe = 0
 
-# НАЧАЛО ЗАПИСИ ===================================================================================================================================
+
+# НАЧАЛО ЗАПИСИ =========================================================================================================================
 while True:
     ret, frame = cap.read()
 
@@ -105,7 +112,7 @@ while True:
     # исправляем искажение камеры
     gray = cv.undistort(gray, K, dist)
 
-# feature matching между предыдущим кадром и нынешним, а затем запись valid features в pts1 и pts2 -------------------------------------------------
+# feature matching между предыдущим кадром и нынешним, а затем запись valid features в pts1 и pts2 ---------------------------------------
     kp, des = orb.detectAndCompute(gray, None)
 
     if prev_des is not None and des is not None:
@@ -153,7 +160,7 @@ while True:
             "pnp_inlier_ratio": 0.0
         }
 
-# если между двумя кадрами нашли 8 или более matches, то вычисляем по ним Essential matrix (E) --------------------------------------------------
+# если между двумя кадрами нашли 8 или более matches, то вычисляем по ним Essential matrix (E) -------------------------------------------------
         if len(pts1) >= 8:
 
             E, mask = cv.findEssentialMat(
@@ -177,7 +184,7 @@ while True:
             if len(pts1) < 8:
                 continue
 
-# далее с помощью матрицы E, pts1, pts2 и матрицы K вычисляем локальное смещение (R,t) камеры между двумя кадрами --------------------------------
+# далее с помощью матрицы E, pts1, pts2 и матрицы K вычисляем локальное смещение (R,t) камеры между двумя кадрами -------------------------------
             _, R, t, pose_mask = cv.recoverPose(
                 E,
                 pts1,
@@ -194,7 +201,7 @@ while True:
             if len(pts1) < 8:
                 continue
 
-# обновляем глобальное перемещение камеры в мире -------------------------------------------------------------------------------------------------
+# обновляем глобальное перемещение камеры в мире ------------------------------------------------------------------------------------------------
             # сохраняем pose предыдущего кадра
             prev_Rwc_for_triangulation = global_R.copy()
             prev_twc_for_triangulation = global_t.copy()
@@ -264,13 +271,17 @@ while True:
             else:
                 recoverpose_count += 1
 
-# список tracked MapPoints, которые попали в этот кадр ----------------------------------------------------------------------------------
+            # список tracked MapPoints, которые попали в этот кадр
             current_frame_map_points = list(tracked_map_points)
 
-            # ляляляляляляляляляляляляля
+            # на каждом новом кадре увеличиваем счётчик, чтобы считать сколько кадров прошло с момента создания последнего Keyframe
+            frames_since_last_keyframe += 1
+
+            # переменная, которая показывает создался ли на этом кадре Keyframe или нет.
+            # нужно в дальнейшем для culling MapPoints
             created_keyframe = False
 
-# критерии создания и само создание KeyFrames, сохраняем его данные (глобальные R и t камеры, keypoints и descriptors) -------------------------------
+# критерии создания и само создание KeyFrames, сохраняем его данные (глобальные R и t камеры, keypoints и descriptors) ------------------------
 
             # если у нас нет ни одного KeyFrame, то создаём его в любом случае
             if not keyframes:
@@ -290,6 +301,7 @@ while True:
                 last_keyFrame_R = global_R.copy()
 
                 created_keyframe = True
+                frames_since_last_keyframe = 0
 
                 #print(f"Keyframe saved: {len(keyframes)}")
                 #print(len(map_points))
@@ -297,19 +309,34 @@ while True:
             # если хотя бы один KeyFrame есть, то смотрим, нужно ли создать новый KeyFrame
             elif last_keyFrame_t is not None and last_keyFrame_R is not None:
 
-                # на каждом кадре считаем насколько далеко камера переместилась, относительно последнего KeyFrame
-                translation = np.linalg.norm(global_t - last_keyFrame_t)
+                # на каждом кадре считаем насколько далеко камера переместилась и повернулась, относительно последнего KeyFrame
+                translation, rotation = compute_keyframe_motion(
+                    global_R,
+                    global_t,
+                    last_keyFrame_R,
+                    last_keyFrame_t
+                )
 
-                # на каждом кадре считаем насколько сильно камера повернулась, относительно последнего KeyFrame
-                R_delta = last_keyFrame_R.T @ global_R
-                rvec, _ = cv.Rodrigues(R_delta)
-                rotation = np.linalg.norm(rvec)
+                # проверяем критерии создания нового Keyframe
+                create_keyframe, keyframe_reason = should_create_keyframe(
+                    translation=translation,
+                    rotation=rotation,
+                    tracking_stats=tracking_stats,
+                    pose_source=pose_source,
+                    map_points_count=len(map_points),
+                    frames_since_last_keyframe=frames_since_last_keyframe,
+                    translation_threshold=cfg.KEYFRAME_TRANSLATION_THRESHOLD,
+                    rotation_threshold=cfg.KEYFRAME_ROTATION_THRESHOLD,
+                    min_frames_between=cfg.KEYFRAME_MIN_FRAMES_BETWEEN,
+                    min_tracked_points=cfg.KEYFRAME_MIN_TRACKED_POINTS,
+                    min_pnp_inlier_ratio=cfg.KEYFRAME_MIN_PNP_INLIER_RATIO,
+                    min_map_points_for_tracking_check=cfg.KEYFRAME_MIN_MAP_POINTS_FOR_TRACKING_CHECK,
+                    weak_tracking_min_translation=cfg.KEYFRAME_WEAK_TRACKING_MIN_TRANSLATION,
+                    weak_tracking_min_rotation=cfg.KEYFRAME_WEAK_TRACKING_MIN_ROTATION
+                )
 
-                # если камера достаточно далеко переместилась или повернулась, или в кадре заметили много новых Map Points, создаём новый KeyFrame
-                if (
-                    translation > cfg.KEYFRAME_TRANSLATION_THRESHOLD 
-                    or rotation > cfg.KEYFRAME_ROTATION_THRESHOLD
-                    ):
+                # если критерии подходят, создаём новый Keyframe
+                if create_keyframe:
 
                     reference_kf = keyframes[-1]
                 
@@ -328,28 +355,36 @@ while True:
                     current_kf = keyframes[-1]
 
                     map_point_id, triangulation_stats = triangulate_new_mappoints_between_keyframes(
-                                                            reference_kf,
-                                                            current_kf,
-                                                            map_points,
-                                                            map_point_id,
-                                                            K,
-                                                            bf,
-                                                            ransac_threshold=cfg.KEYFRAME_TRIANGULATION_RANSAC_THRESHOLD,
-                                                            min_ransac_inliers=cfg.KEYFRAME_TRIANGULATION_MIN_RANSAC_INLIERS,
-                                                            max_depth=cfg.MAX_TRIANGULATION_DEPTH,
-                                                            max_descriptor_distance=cfg.KEYFRAME_TRIANGULATION_MATCH_DISTANCE,
-                                                            max_reprojection_error=cfg.KEYFRAME_TRIANGULATION_MAX_REPROJECTION_ERROR,
-                                                            max_new_points=cfg.KEYFRAME_TRIANGULATION_MAX_NEW_POINTS
-                                                        )
+                        reference_kf,
+                        current_kf,
+                        map_points,
+                        map_point_id,
+                        K,
+                        bf,
+                        ransac_threshold=cfg.KEYFRAME_TRIANGULATION_RANSAC_THRESHOLD,
+                        min_ransac_inliers=cfg.KEYFRAME_TRIANGULATION_MIN_RANSAC_INLIERS,
+                        max_depth=cfg.MAX_TRIANGULATION_DEPTH,
+                        max_descriptor_distance=cfg.KEYFRAME_TRIANGULATION_MATCH_DISTANCE,
+                        max_reprojection_error=cfg.KEYFRAME_TRIANGULATION_MAX_REPROJECTION_ERROR,
+                        max_new_points=cfg.KEYFRAME_TRIANGULATION_MAX_NEW_POINTS
+                    )
 
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
 
                     created_keyframe = True
+                    frames_since_last_keyframe = 0
 
-                    print(f"Keyframe saved: {len(keyframes)}")
+                    print(
+                        f"Keyframe saved: {len(keyframes)} "
+                        f"reason={keyframe_reason} "
+                        f"translation={translation:.3f} "
+                        f"rotation={rotation:.3f}"
+                    )
+                    print("-" * 100)
+
                     print(f"KeyFrame triangulation: {triangulation_stats}")
-                    #print(len(map_points))
+                    print("=" * 100)
             
 # Culling MapPoints ---------------------------------------------------------------------------------------------------------------------
             if (
@@ -408,27 +443,27 @@ while True:
 
             # тут визуализация map_points (Pw) в мире
             last_drawn_map_point_idx = draw_new_mappoints(
-                                            map_img,
-                                            map_points,
-                                            last_drawn_map_point_idx,
-                                            origin=(400, 400)
-                                        )
+                map_img,
+                map_points,
+                last_drawn_map_point_idx,
+                origin=(400, 400)
+            )
         
 
 # склеиваем предыдущий кадр (слева) и текущий кадр (справа) и проводим линии между их matches --------------------------------------------------
 
         # в верхнем левом углу выводим текстом количество matches
         draw_img = draw_feature_matching_view(
-                        prev_gray,
-                        prev_kp,
-                        gray,
-                        kp,
-                        matches,
-                        pose_source,
-                        local_map_points,
-                        tracking_stats,
-                        max_matches_to_draw=50
-                    )
+            prev_gray,
+            prev_kp,
+            gray,
+            kp,
+            matches,
+            pose_source,
+            local_map_points,
+            tracking_stats,
+            max_matches_to_draw=50
+        )
 
         show_slam_windows(
             draw_img,
