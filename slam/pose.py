@@ -41,7 +41,8 @@ def estimate_pose_pnp(
         return False, None, None, [], {
             "points": len(tracked_map_points),
             "inliers": 0,
-            "inlier_ratio": 0.0
+            "inlier_ratio": 0.0,
+            "reason": "too_few_tracked_pairs"
         }
 
     object_points = []
@@ -75,7 +76,8 @@ def estimate_pose_pnp(
         return False, None, None, [], {
             "points": len(object_points),
             "inliers": 0,
-            "inlier_ratio": 0.0
+            "inlier_ratio": 0.0,
+            "reason": "too_few_valid_points"
         }
 
     object_points = np.asarray(
@@ -103,7 +105,8 @@ def estimate_pose_pnp(
         return False, None, None, [], {
             "points": len(object_points),
             "inliers": 0,
-            "inlier_ratio": 0.0
+            "inlier_ratio": 0.0,
+            "reason": "solvepnp_failed"
         }
 
     inlier_indices = inliers.ravel().astype(int)
@@ -112,7 +115,8 @@ def estimate_pose_pnp(
         return False, None, None, [], {
             "points": len(object_points),
             "inliers": len(inlier_indices),
-            "inlier_ratio": len(inlier_indices) / len(object_points)
+            "inlier_ratio": len(inlier_indices) / len(object_points),
+            "reason": "too_few_inliers"
         }
 
     # OpenCV pose: world -> camera
@@ -131,7 +135,8 @@ def estimate_pose_pnp(
     pnp_stats = {
         "points": len(object_points),
         "inliers": len(inlier_indices),
-        "inlier_ratio": len(inlier_indices) / len(object_points)
+        "inlier_ratio": len(inlier_indices) / len(object_points),
+        "reason": "success"
     }
 
     return True, Rwc, twc, inlier_tracked_pairs, pnp_stats

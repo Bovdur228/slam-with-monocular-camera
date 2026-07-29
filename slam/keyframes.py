@@ -136,7 +136,6 @@ def should_create_keyframe(
     if not tracking_check_enabled:
         return False, "not_needed"
 
-    # Первый вариант делаем консервативным:
     # weak tracking создаёт KeyFrame только если pose была получена через PnP.
     # Если pose_source == recoverPose, не форсируем KeyFrame по tracking quality,
     # потому что recoverPose-pose менее надёжна.
@@ -147,7 +146,7 @@ def should_create_keyframe(
         translation > weak_tracking_min_translation
         or rotation > weak_tracking_min_rotation
     )
-    
+
     if not weak_tracking_has_enough_motion:
         return False, "weak_tracking_too_little_motion"
 
