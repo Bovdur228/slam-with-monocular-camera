@@ -141,8 +141,122 @@ def estimate_pose_pnp(
 
     return True, Rwc, twc, inlier_tracked_pairs, pnp_stats
 
-# -------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------------------------------------------------------------
 def update_pose_from_recover_pose(prev_Rwc, prev_twc, R, t):
     curr_Rwc = prev_Rwc @ R.T
     curr_twc = prev_twc - prev_Rwc @ R.T @ t
     return curr_Rwc, curr_twc
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def compute_pose_delta(
+    current_R,
+    current_t,
+    reference_R,
+    reference_t
+):
+    """
+    Считает разницу между двумя pose камеры.
+
+    current_R / current_t:
+        candidate pose, которую мы хотим проверить.
+
+    reference_R / reference_t:
+        предыдущая надёжная pose, относительно которой считаем jump.
+
+    Возвращает:
+        translation_jump: float
+        rotation_jump: float
+    """
+
+    if reference_R is None or reference_t is None:
+        return 0.0, 0.0
+
+    translation_jump = np.linalg.norm(
+        current_t - reference_t
+    )
+
+    R_delta = reference_R.T @ current_R
+
+    rvec, _ = cv.Rodrigues(
+        R_delta
+    )
+
+    rotation_jump = np.linalg.norm(
+        rvec
+    )
+
+    return float(translation_jump), float(rotation_jump)
+
+# -------------------------------------------------------------------------------------------------------------------------------------------
+def check_pnp_pose_safety(
+    candidate_Rwc,
+    candidate_twc,
+    reference_Rwc,
+    reference_twc,
+    pnp_stats,
+    min_inliers,
+    min_inlier_ratio,
+    max_translation_jump,
+    max_rotation_jump
+):
+    """
+    Проверяет, можно ли принимать PnP pose.
+
+    candidate_Rwc / candidate_twc:
+        pose, которую предложил PnP.
+
+    reference_Rwc / reference_twc:
+        предыдущая принятая pose, относительно которой проверяем jump.
+
+    Возвращает:
+        pose_is_safe: bool
+        reject_reason: str | None
+        translation_jump: float
+        rotation_jump: float
+    """
+
+    translation_jump, rotation_jump = compute_pose_delta(
+        candidate_Rwc,
+        candidate_twc,
+        reference_Rwc,
+        reference_twc
+    )
+
+    if pnp_stats["inliers"] < min_inliers:
+        return (
+            False,
+            "reject_too_few_inliers",
+            translation_jump,
+            rotation_jump
+        )
+
+    if pnp_stats["inlier_ratio"] < min_inlier_ratio:
+        return (
+            False,
+            "reject_low_inlier_ratio",
+            translation_jump,
+            rotation_jump
+        )
+
+    if translation_jump > max_translation_jump:
+        return (
+            False,
+            "reject_translation_jump",
+            translation_jump,
+            rotation_jump
+        )
+
+    if rotation_jump > max_rotation_jump:
+        return (
+            False,
+            "reject_rotation_jump",
+            translation_jump,
+            rotation_jump
+        )
+
+    return (
+        True,
+        None,
+        translation_jump,
+        rotation_jump
+    )

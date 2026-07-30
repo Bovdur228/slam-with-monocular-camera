@@ -9,7 +9,10 @@ from slam.tracking import (
     track_existing_mappoints,
 )
 
-from slam.pose import estimate_pose_pnp
+from slam.pose import (
+    estimate_pose_pnp,
+    check_pnp_pose_safety,
+)
 
 from slam.keyframes import (
     create_KeyFrame,
@@ -40,27 +43,7 @@ def increment_counter(counter, reason):
 
     counter[reason] = counter.get(reason, 0) + 1
 
-
-def get_retry_reject_reason(
-    retry_pnp_stats,
-    retry_translation_jump,
-    retry_rotation_jump
-):
-    if retry_pnp_stats["inliers"] < cfg.PNP_RETRY_ACCEPT_MIN_INLIERS:
-        return "reject_too_few_inliers"
-
-    if retry_pnp_stats["inlier_ratio"] < cfg.PNP_RETRY_ACCEPT_MIN_INLIER_RATIO:
-        return "reject_low_inlier_ratio"
-
-    if retry_translation_jump > cfg.PNP_RETRY_MAX_TRANSLATION_JUMP:
-        return "reject_translation_jump"
-
-    if retry_rotation_jump > cfg.PNP_RETRY_MAX_ROTATION_JUMP:
-        return "reject_rotation_jump"
-
-    return "reject_unknown"
-
-
+# ---------------------------------------------------------------------------------------------------------------------------------------------
 def print_counter(title, counter):
     print(title)
 
@@ -70,6 +53,80 @@ def print_counter(title, counter):
 
     for reason, count in sorted(counter.items(), key=lambda x: x[1], reverse=True):
         print(f"  {reason}: {count}")
+
+# ------------------------------------------------------------------------------------------------------------------------------------------
+def create_tracking_diag():
+    return {
+        "candidates": [],
+        "projected": [],
+        "inside": [],
+        "tracked": [],
+        "pnp_points": [],
+        "pnp_inliers": [],
+        "pnp_inlier_ratio": []
+    }
+
+# -------------------------------------------------------------------------------------------------------------------------------------------
+def add_tracking_diag(diag, tracking_stats, pnp_stats):
+    diag["candidates"].append(
+        tracking_stats.get("candidates", 0)
+    )
+
+    diag["projected"].append(
+        tracking_stats.get("projected", 0)
+    )
+
+    diag["inside"].append(
+        tracking_stats.get("inside", 0)
+    )
+
+    diag["tracked"].append(
+        tracking_stats.get("tracked", 0)
+    )
+
+    diag["pnp_points"].append(
+        pnp_stats.get("points", 0)
+    )
+
+    diag["pnp_inliers"].append(
+        pnp_stats.get("inliers", 0)
+    )
+
+    diag["pnp_inlier_ratio"].append(
+        pnp_stats.get("inlier_ratio", 0.0)
+    )
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def print_numeric_summary(name, values):
+    if len(values) == 0:
+        print(f"  {name}: none")
+        return
+
+    arr = np.asarray(values, dtype=np.float64)
+
+    print(
+        f"  {name}: "
+        f"min={arr.min():.2f}, "
+        f"mean={arr.mean():.2f}, "
+        f"median={np.median(arr):.2f}, "
+        f"max={arr.max():.2f}"
+    )
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def print_tracking_diag(title, diag):
+    print(title)
+
+    if len(diag["tracked"]) == 0:
+        print("  none")
+        return
+
+    print_numeric_summary("candidates", diag["candidates"])
+    print_numeric_summary("projected", diag["projected"])
+    print_numeric_summary("inside", diag["inside"])
+    print_numeric_summary("tracked", diag["tracked"])
+    print_numeric_summary("pnp_points", diag["pnp_points"])
+    print_numeric_summary("pnp_inliers", diag["pnp_inliers"])
+    print_numeric_summary("pnp_inlier_ratio", diag["pnp_inlier_ratio"])
 
 # ========================================================================================================================================
 
@@ -133,16 +190,28 @@ last_drawn_map_point_idx = 0
 # счётчик PnP кадров и recoverPose кадров ----------------------------------------------------------------------------------------------
 pnp_success_count = 0              # общий счётчик PnP кадров
 pnp_strict_success_count = 0       # счёткий strict PnP кадров
+pnp_strict_rejected_count = 0      # счётчик отклонённых strict PnP кадров
 pnp_retry_success_count = 0        # счётчик "relaxed" PnP кадров
-pnp_retry_rejected_count = 0       #счётчик отклонённых "relaxed" PnP кадров
+pnp_retry_rejected_count = 0       # счётчик отклонённых "relaxed" PnP кадров
 recoverpose_count = 0              # счётчик recoverpose кадров
 
 pnp_retry_attempt_count = 0
 pnp_retry_raw_success_count = 0
 
 pnp_strict_failure_reasons = {}
+pnp_strict_reject_reasons = {}
 pnp_retry_failure_reasons = {}
 pnp_retry_reject_reasons = {}
+
+# tracking diagnostics ----------------------------------------------------------------------------------------------------------------
+strict_pnp_success_diag = create_tracking_diag()
+strict_pnp_failure_diag = create_tracking_diag()
+strict_pnp_rejected_diag = create_tracking_diag()
+
+retry_pnp_success_diag = create_tracking_diag()
+retry_pnp_failure_diag = create_tracking_diag()
+retry_pnp_rejected_diag = create_tracking_diag()
+
 
 # счётчик кадров после последнего созданного Keyframe ---------------------------------------------------------------------------------
 frames_since_last_keyframe = 0
@@ -303,31 +372,89 @@ while True:
                 iterations_count=100
             )
 
-            if not pnp_success:
+            strict_pnp_accepted = False
+
+            # -------------------------------------------------------------------------
+            # Strict PnP safety check
+            # -------------------------------------------------------------------------
+            if pnp_success:
+
+                strict_pose_is_safe, strict_reject_reason, strict_translation_jump, strict_rotation_jump = check_pnp_pose_safety(
+                    pnp_Rwc,
+                    pnp_twc,
+                    prev_Rwc_for_triangulation,
+                    prev_twc_for_triangulation,
+                    pnp_stats,
+                    min_inliers=cfg.PNP_ACCEPT_MIN_INLIERS,
+                    min_inlier_ratio=cfg.PNP_ACCEPT_MIN_INLIER_RATIO,
+                    max_translation_jump=cfg.PNP_MAX_TRANSLATION_JUMP,
+                    max_rotation_jump=cfg.PNP_MAX_ROTATION_JUMP
+                )
+
+                tracking_stats["strict_translation_jump"] = strict_translation_jump
+                tracking_stats["strict_rotation_jump"] = strict_rotation_jump
+                tracking_stats["strict_pose_is_safe"] = strict_pose_is_safe
+
+                if strict_pose_is_safe:
+
+                    add_tracking_diag(
+                        strict_pnp_success_diag,
+                        tracking_stats,
+                        pnp_stats
+                    )
+
+                    global_R = pnp_Rwc.copy()
+                    global_t = pnp_twc.copy()
+
+                    tracked_map_points = pnp_inlier_tracked_points
+
+                    pose_source = "PnP"
+                    pnp_mode = "strict"
+                    strict_pnp_accepted = True
+
+                else:
+
+                    pnp_strict_rejected_count += 1
+
+                    increment_counter(
+                        pnp_strict_reject_reasons,
+                        strict_reject_reason
+                    )
+
+                    add_tracking_diag(
+                        strict_pnp_rejected_diag,
+                        tracking_stats,
+                        pnp_stats
+                    )
+
+                    pnp_stats = pnp_stats.copy()
+                    pnp_stats["reason"] = strict_reject_reason
+
+                    tracked_map_points = []
+                    pnp_mode = None
+
+            else:
+
                 increment_counter(
                     pnp_strict_failure_reasons,
                     pnp_stats.get("reason")
                 )
 
-            if pnp_success:
-            
-                global_R = pnp_Rwc.copy()
-                global_t = pnp_twc.copy()
+                add_tracking_diag(
+                    strict_pnp_failure_diag,
+                    tracking_stats,
+                    pnp_stats
+                )
 
-                tracked_map_points = pnp_inlier_tracked_points
+            # -------------------------------------------------------------------------
+            # Relaxed tracking + retry PnP
+            # -------------------------------------------------------------------------
+            if not strict_pnp_accepted:
 
-                pose_source = "PnP"
-                pnp_mode = "strict"
-
-            else:
-            
-                # ---------------------------------------------------------------------
-                # Relaxed tracking + retry PnP
-                # ---------------------------------------------------------------------
                 if cfg.PNP_RETRY_ENABLED:
 
                     pnp_retry_attempt_count += 1
-                
+
                     retry_tracked_map_points, retry_tracking_stats = track_existing_mappoints(
                         kp,
                         des,
@@ -352,24 +479,26 @@ while True:
                         iterations_count=cfg.PNP_RETRY_ITERATIONS_COUNT
                     )
 
-
-
                     if retry_pnp_success:
 
                         pnp_retry_raw_success_count += 1
 
-                        retry_translation_jump, retry_rotation_jump = compute_keyframe_motion(
+                        add_tracking_diag(
+                            retry_pnp_success_diag,
+                            retry_tracking_stats,
+                            retry_pnp_stats
+                        )
+
+                        retry_pose_is_safe, retry_reject_reason, retry_translation_jump, retry_rotation_jump = check_pnp_pose_safety(
                             retry_pnp_Rwc,
                             retry_pnp_twc,
                             prev_Rwc_for_triangulation,
-                            prev_twc_for_triangulation
-                        )
-
-                        retry_pose_is_safe = (
-                            retry_pnp_stats["inliers"] >= cfg.PNP_RETRY_ACCEPT_MIN_INLIERS
-                            and retry_pnp_stats["inlier_ratio"] >= cfg.PNP_RETRY_ACCEPT_MIN_INLIER_RATIO
-                            and retry_translation_jump <= cfg.PNP_RETRY_MAX_TRANSLATION_JUMP
-                            and retry_rotation_jump <= cfg.PNP_RETRY_MAX_ROTATION_JUMP
+                            prev_twc_for_triangulation,
+                            retry_pnp_stats,
+                            min_inliers=cfg.PNP_RETRY_ACCEPT_MIN_INLIERS,
+                            min_inlier_ratio=cfg.PNP_RETRY_ACCEPT_MIN_INLIER_RATIO,
+                            max_translation_jump=cfg.PNP_RETRY_MAX_TRANSLATION_JUMP,
+                            max_rotation_jump=cfg.PNP_RETRY_MAX_ROTATION_JUMP
                         )
 
                         retry_tracking_stats["retry_translation_jump"] = retry_translation_jump
@@ -393,12 +522,6 @@ while True:
 
                             pnp_retry_rejected_count += 1
 
-                            retry_reject_reason = get_retry_reject_reason(
-                                retry_pnp_stats,
-                                retry_translation_jump,
-                                retry_rotation_jump
-                            )
-
                             increment_counter(
                                 pnp_retry_reject_reasons,
                                 retry_reject_reason
@@ -406,8 +529,15 @@ while True:
 
                             retry_tracking_stats["retry_reject_reason"] = retry_reject_reason
 
+                            add_tracking_diag(
+                                retry_pnp_rejected_diag,
+                                retry_tracking_stats,
+                                retry_pnp_stats
+                            )
+
                             tracking_stats = retry_tracking_stats
-                            pnp_stats = retry_pnp_stats
+                            pnp_stats = retry_pnp_stats.copy()
+                            pnp_stats["reason"] = retry_reject_reason
 
                             tracked_map_points = []
                             pnp_mode = None
@@ -418,7 +548,13 @@ while True:
                             pnp_retry_failure_reasons,
                             retry_pnp_stats.get("reason")
                         )
-                    
+
+                        add_tracking_diag(
+                            retry_pnp_failure_diag,
+                            retry_tracking_stats,
+                            retry_pnp_stats
+                        )
+
                         tracking_stats = retry_tracking_stats
                         pnp_stats = retry_pnp_stats
 
@@ -426,7 +562,7 @@ while True:
                         pnp_mode = None
 
                 else:
-                
+
                     tracked_map_points = []
                     pnp_mode = None
 
@@ -678,6 +814,7 @@ cv.destroyAllWindows()
 print("=" * 100)
 print(f"PnP frames: {pnp_success_count}")
 print(f"PnP strict frames: {pnp_strict_success_count}")
+print(f"PnP strict rejected frames: {pnp_strict_rejected_count}")
 print(f"PnP retry frames: {pnp_retry_success_count}")
 print(f"PnP retry attempts: {pnp_retry_attempt_count}")
 print(f"PnP retry raw success frames: {pnp_retry_raw_success_count}")
@@ -688,13 +825,53 @@ print("-" * 100)
 print_counter("Strict PnP failure reasons:", pnp_strict_failure_reasons)
 print("-" * 100)
 
+print_counter("Strict PnP reject reasons:", pnp_strict_reject_reasons)
+print("-" * 100)
+
 print_counter("Retry PnP failure reasons:", pnp_retry_failure_reasons)
 print("-" * 100)
 
 print_counter("Retry PnP reject reasons:", pnp_retry_reject_reasons)
 print("-" * 100)
 
+# -------------------------------------------------------------------------------
+print_tracking_diag(
+    "Strict PnP success tracking diagnostics:",
+    strict_pnp_success_diag
+)
+print("-" * 100)
 
+print_tracking_diag(
+    "Strict PnP failure tracking diagnostics:",
+    strict_pnp_failure_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Strict PnP rejected tracking diagnostics:",
+    strict_pnp_rejected_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Retry PnP raw success tracking diagnostics:",
+    retry_pnp_success_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Retry PnP failure tracking diagnostics:",
+    retry_pnp_failure_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Retry PnP rejected tracking diagnostics:",
+    retry_pnp_rejected_diag
+)
+print("-" * 100)
+
+# ------------------------------------------------------------------
 run_ba_test(
     keyframes,
     map_points,

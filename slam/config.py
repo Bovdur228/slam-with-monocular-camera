@@ -13,6 +13,14 @@ PNP_REPROJECTION_ERROR = 12.0
 LOCAL_MAP_RECENT_KEYFRAMES = 10
 LOCAL_MAP_FALLBACK_POINTS = 3000
 
+# Strict PnP acceptance ---------------------------------------------------------------------------------------------------------------
+
+PNP_ACCEPT_MIN_INLIERS = 20
+PNP_ACCEPT_MIN_INLIER_RATIO = 0.60
+
+PNP_MAX_TRANSLATION_JUMP = 50.0
+PNP_MAX_ROTATION_JUMP = 1.5
+
 # PnP retry ------------------------------------------------------------------------------------------------------------------------------
 
 PNP_RETRY_ENABLED = True
@@ -28,8 +36,8 @@ PNP_RETRY_ITERATIONS_COUNT = 150
 
 # PnP retry acceptance -------------------------------------------------------------------------------------------------------------------
 
-PNP_RETRY_ACCEPT_MIN_INLIERS = 20
-PNP_RETRY_ACCEPT_MIN_INLIER_RATIO = 0.45
+PNP_RETRY_ACCEPT_MIN_INLIERS = 16
+PNP_RETRY_ACCEPT_MIN_INLIER_RATIO = 0.6
 
 PNP_RETRY_MAX_TRANSLATION_JUMP = 30.0
 PNP_RETRY_MAX_ROTATION_JUMP = 1.2
