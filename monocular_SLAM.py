@@ -63,7 +63,9 @@ def create_tracking_diag():
         "tracked": [],
         "pnp_points": [],
         "pnp_inliers": [],
-        "pnp_inlier_ratio": []
+        "pnp_inlier_ratio": [],
+        "translation_jump": [],
+        "rotation_jump": []
     }
 
 # -------------------------------------------------------------------------------------------------------------------------------------------
@@ -96,6 +98,16 @@ def add_tracking_diag(diag, tracking_stats, pnp_stats):
         pnp_stats.get("inlier_ratio", 0.0)
     )
 
+    if "translation_jump" in tracking_stats:
+        diag["translation_jump"].append(
+            tracking_stats["translation_jump"]
+        )
+
+    if "rotation_jump" in tracking_stats:
+        diag["rotation_jump"].append(
+            tracking_stats["rotation_jump"]
+        )
+
 # --------------------------------------------------------------------------------------------------------------------------------------------
 def print_numeric_summary(name, values):
     if len(values) == 0:
@@ -127,6 +139,18 @@ def print_tracking_diag(title, diag):
     print_numeric_summary("pnp_points", diag["pnp_points"])
     print_numeric_summary("pnp_inliers", diag["pnp_inliers"])
     print_numeric_summary("pnp_inlier_ratio", diag["pnp_inlier_ratio"])
+
+    if len(diag["translation_jump"]) > 0:
+        print_numeric_summary(
+            "translation_jump",
+            diag["translation_jump"]
+        )
+
+    if len(diag["rotation_jump"]) > 0:
+        print_numeric_summary(
+            "rotation_jump",
+            diag["rotation_jump"]
+        )
 
 # ========================================================================================================================================
 
@@ -408,6 +432,9 @@ while True:
                 tracking_stats["strict_rotation_jump"] = strict_rotation_jump
                 tracking_stats["strict_pose_is_safe"] = strict_pose_is_safe
 
+                tracking_stats["translation_jump"] = strict_translation_jump
+                tracking_stats["rotation_jump"] = strict_rotation_jump
+
                 if strict_pose_is_safe:
 
                     add_tracking_diag(
@@ -496,12 +523,6 @@ while True:
 
                     pnp_prev_pose_retry_raw_success_count += 1
 
-                    add_tracking_diag(
-                        prev_pose_retry_success_diag,
-                        prev_pose_retry_tracking_stats,
-                        prev_pose_retry_pnp_stats
-                    )
-
                     prev_pose_retry_is_safe, prev_pose_retry_reject_reason, prev_pose_retry_translation_jump, prev_pose_retry_rotation_jump = check_pnp_pose_safety(
                         prev_pose_retry_pnp_Rwc,
                         prev_pose_retry_pnp_twc,
@@ -517,6 +538,15 @@ while True:
                     prev_pose_retry_tracking_stats["prev_pose_retry_translation_jump"] = prev_pose_retry_translation_jump
                     prev_pose_retry_tracking_stats["prev_pose_retry_rotation_jump"] = prev_pose_retry_rotation_jump
                     prev_pose_retry_tracking_stats["prev_pose_retry_pose_is_safe"] = prev_pose_retry_is_safe
+
+                    prev_pose_retry_tracking_stats["translation_jump"] = prev_pose_retry_translation_jump
+                    prev_pose_retry_tracking_stats["rotation_jump"] = prev_pose_retry_rotation_jump
+
+                    add_tracking_diag(
+                        prev_pose_retry_success_diag,
+                        prev_pose_retry_tracking_stats,
+                        prev_pose_retry_pnp_stats
+                    )
 
                     if prev_pose_retry_is_safe:
 
@@ -611,13 +641,7 @@ while True:
                     if retry_pnp_success:
 
                         pnp_retry_raw_success_count += 1
-
-                        add_tracking_diag(
-                            retry_pnp_success_diag,
-                            retry_tracking_stats,
-                            retry_pnp_stats
-                        )
-
+                    
                         retry_pose_is_safe, retry_reject_reason, retry_translation_jump, retry_rotation_jump = check_pnp_pose_safety(
                             retry_pnp_Rwc,
                             retry_pnp_twc,
@@ -629,10 +653,19 @@ while True:
                             max_translation_jump=cfg.PNP_RETRY_MAX_TRANSLATION_JUMP,
                             max_rotation_jump=cfg.PNP_RETRY_MAX_ROTATION_JUMP
                         )
-
+                    
                         retry_tracking_stats["retry_translation_jump"] = retry_translation_jump
                         retry_tracking_stats["retry_rotation_jump"] = retry_rotation_jump
                         retry_tracking_stats["retry_pose_is_safe"] = retry_pose_is_safe
+                    
+                        retry_tracking_stats["translation_jump"] = retry_translation_jump
+                        retry_tracking_stats["rotation_jump"] = retry_rotation_jump
+                    
+                        add_tracking_diag(
+                            retry_pnp_success_diag,
+                            retry_tracking_stats,
+                            retry_pnp_stats
+                        )
 
                         if retry_pose_is_safe:
 
