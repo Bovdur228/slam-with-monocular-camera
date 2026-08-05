@@ -191,17 +191,26 @@ last_drawn_map_point_idx = 0
 pnp_success_count = 0              # общий счётчик PnP кадров
 pnp_strict_success_count = 0       # счёткий strict PnP кадров
 pnp_strict_rejected_count = 0      # счётчик отклонённых strict PnP кадров
-pnp_retry_success_count = 0        # счётчик "relaxed" PnP кадров
-pnp_retry_rejected_count = 0       # счётчик отклонённых "relaxed" PnP кадров
 recoverpose_count = 0              # счётчик recoverpose кадров
+pnp_retry_success_count = 0        # счётчик "relaxed" PnP кадров
+pnp_retry_rejected_count = 0       # счётчик отклонённых "relaxed" PnP 
+pnp_prev_pose_retry_success_count = 0
+pnp_prev_pose_retry_rejected_count = 0
 
 pnp_retry_attempt_count = 0
 pnp_retry_raw_success_count = 0
 
+pnp_prev_pose_retry_attempt_count = 0
+pnp_prev_pose_retry_raw_success_count = 0
+
 pnp_strict_failure_reasons = {}
 pnp_strict_reject_reasons = {}
+
 pnp_retry_failure_reasons = {}
 pnp_retry_reject_reasons = {}
+
+pnp_prev_pose_retry_failure_reasons = {}
+pnp_prev_pose_retry_reject_reasons = {}
 
 # tracking diagnostics ----------------------------------------------------------------------------------------------------------------
 strict_pnp_success_diag = create_tracking_diag()
@@ -211,6 +220,10 @@ strict_pnp_rejected_diag = create_tracking_diag()
 retry_pnp_success_diag = create_tracking_diag()
 retry_pnp_failure_diag = create_tracking_diag()
 retry_pnp_rejected_diag = create_tracking_diag()
+
+prev_pose_retry_success_diag = create_tracking_diag()
+prev_pose_retry_failure_diag = create_tracking_diag()
+prev_pose_retry_rejected_diag = create_tracking_diag()
 
 
 # счётчик кадров после последнего созданного Keyframe ---------------------------------------------------------------------------------
@@ -446,10 +459,126 @@ while True:
                     pnp_stats
                 )
 
+            pnp_accepted = strict_pnp_accepted
+
+            # -------------------------------------------------------------------------
+            # Previous-pose tracking + previous-pose retry PnP
+            # -------------------------------------------------------------------------
+            if not pnp_accepted and cfg.PNP_PREV_POSE_RETRY_ENABLED:
+
+                pnp_prev_pose_retry_attempt_count += 1
+
+                prev_pose_retry_tracked_map_points, prev_pose_retry_tracking_stats = track_existing_mappoints(
+                    kp,
+                    des,
+                    local_map_points,
+                    prev_Rwc_for_triangulation,
+                    prev_twc_for_triangulation,
+                    K,
+                    gray.shape,
+                    search_radius=cfg.TRACKING_PREV_POSE_RETRY_SEARCH_RADIUS,
+                    descriptor_threshold=cfg.TRACKING_PREV_POSE_RETRY_DESCRIPTOR_THRESHOLD,
+                    max_points=None
+                )
+
+                prev_pose_retry_pnp_success, prev_pose_retry_pnp_Rwc, prev_pose_retry_pnp_twc, prev_pose_retry_pnp_inlier_tracked_points, prev_pose_retry_pnp_stats = estimate_pose_pnp(
+                    prev_pose_retry_tracked_map_points,
+                    kp,
+                    K,
+                    min_points=cfg.PNP_PREV_POSE_RETRY_MIN_POINTS,
+                    min_inliers=cfg.PNP_PREV_POSE_RETRY_MIN_INLIERS,
+                    reprojection_error_threshold=cfg.PNP_PREV_POSE_RETRY_REPROJECTION_ERROR,
+                    confidence=cfg.PNP_PREV_POSE_RETRY_CONFIDENCE,
+                    iterations_count=cfg.PNP_PREV_POSE_RETRY_ITERATIONS_COUNT
+                )
+
+                if prev_pose_retry_pnp_success:
+
+                    pnp_prev_pose_retry_raw_success_count += 1
+
+                    add_tracking_diag(
+                        prev_pose_retry_success_diag,
+                        prev_pose_retry_tracking_stats,
+                        prev_pose_retry_pnp_stats
+                    )
+
+                    prev_pose_retry_is_safe, prev_pose_retry_reject_reason, prev_pose_retry_translation_jump, prev_pose_retry_rotation_jump = check_pnp_pose_safety(
+                        prev_pose_retry_pnp_Rwc,
+                        prev_pose_retry_pnp_twc,
+                        prev_Rwc_for_triangulation,
+                        prev_twc_for_triangulation,
+                        prev_pose_retry_pnp_stats,
+                        min_inliers=cfg.PNP_PREV_POSE_RETRY_ACCEPT_MIN_INLIERS,
+                        min_inlier_ratio=cfg.PNP_PREV_POSE_RETRY_ACCEPT_MIN_INLIER_RATIO,
+                        max_translation_jump=cfg.PNP_PREV_POSE_RETRY_MAX_TRANSLATION_JUMP,
+                        max_rotation_jump=cfg.PNP_PREV_POSE_RETRY_MAX_ROTATION_JUMP
+                    )
+
+                    prev_pose_retry_tracking_stats["prev_pose_retry_translation_jump"] = prev_pose_retry_translation_jump
+                    prev_pose_retry_tracking_stats["prev_pose_retry_rotation_jump"] = prev_pose_retry_rotation_jump
+                    prev_pose_retry_tracking_stats["prev_pose_retry_pose_is_safe"] = prev_pose_retry_is_safe
+
+                    if prev_pose_retry_is_safe:
+
+                        global_R = prev_pose_retry_pnp_Rwc.copy()
+                        global_t = prev_pose_retry_pnp_twc.copy()
+
+                        tracked_map_points = prev_pose_retry_pnp_inlier_tracked_points
+
+                        tracking_stats = prev_pose_retry_tracking_stats
+                        pnp_stats = prev_pose_retry_pnp_stats
+
+                        pose_source = "PnP"
+                        pnp_mode = "prev_pose_retry"
+                        pnp_accepted = True
+
+                    else:
+
+                        pnp_prev_pose_retry_rejected_count += 1
+
+                        increment_counter(
+                            pnp_prev_pose_retry_reject_reasons,
+                            prev_pose_retry_reject_reason
+                        )
+
+                        prev_pose_retry_tracking_stats["prev_pose_retry_reject_reason"] = prev_pose_retry_reject_reason
+
+                        add_tracking_diag(
+                            prev_pose_retry_rejected_diag,
+                            prev_pose_retry_tracking_stats,
+                            prev_pose_retry_pnp_stats
+                        )
+
+                        tracking_stats = prev_pose_retry_tracking_stats
+                        pnp_stats = prev_pose_retry_pnp_stats.copy()
+                        pnp_stats["reason"] = prev_pose_retry_reject_reason
+
+                        tracked_map_points = []
+                        pnp_mode = None
+
+                else:
+
+                    increment_counter(
+                        pnp_prev_pose_retry_failure_reasons,
+                        prev_pose_retry_pnp_stats.get("reason")
+                    )
+
+                    add_tracking_diag(
+                        prev_pose_retry_failure_diag,
+                        prev_pose_retry_tracking_stats,
+                        prev_pose_retry_pnp_stats
+                    )
+
+                    tracking_stats = prev_pose_retry_tracking_stats
+                    pnp_stats = prev_pose_retry_pnp_stats
+
+                    tracked_map_points = []
+                    pnp_mode = None
+
             # -------------------------------------------------------------------------
             # Relaxed tracking + retry PnP
             # -------------------------------------------------------------------------
-            if not strict_pnp_accepted:
+            if not pnp_accepted:
 
                 if cfg.PNP_RETRY_ENABLED:
 
@@ -517,6 +646,7 @@ while True:
 
                             pose_source = "PnP"
                             pnp_mode = "retry"
+                            pnp_accepted = True
 
                         else:
 
@@ -582,6 +712,9 @@ while True:
 
                 if pnp_mode == "strict":
                     pnp_strict_success_count += 1
+
+                elif pnp_mode == "prev_pose_retry":
+                    pnp_prev_pose_retry_success_count += 1
 
                 elif pnp_mode == "retry":
                     pnp_retry_success_count += 1
@@ -815,6 +948,10 @@ print("=" * 100)
 print(f"PnP frames: {pnp_success_count}")
 print(f"PnP strict frames: {pnp_strict_success_count}")
 print(f"PnP strict rejected frames: {pnp_strict_rejected_count}")
+print(f"PnP prev-pose retry frames: {pnp_prev_pose_retry_success_count}")
+print(f"PnP prev-pose retry attempts: {pnp_prev_pose_retry_attempt_count}")
+print(f"PnP prev-pose retry raw success frames: {pnp_prev_pose_retry_raw_success_count}")
+print(f"PnP prev-pose retry rejected frames: {pnp_prev_pose_retry_rejected_count}")
 print(f"PnP retry frames: {pnp_retry_success_count}")
 print(f"PnP retry attempts: {pnp_retry_attempt_count}")
 print(f"PnP retry raw success frames: {pnp_retry_raw_success_count}")
@@ -826,6 +963,12 @@ print_counter("Strict PnP failure reasons:", pnp_strict_failure_reasons)
 print("-" * 100)
 
 print_counter("Strict PnP reject reasons:", pnp_strict_reject_reasons)
+print("-" * 100)
+
+print_counter("Prev-pose retry PnP failure reasons:", pnp_prev_pose_retry_failure_reasons)
+print("-" * 100)
+
+print_counter("Prev-pose retry PnP reject reasons:", pnp_prev_pose_retry_reject_reasons)
 print("-" * 100)
 
 print_counter("Retry PnP failure reasons:", pnp_retry_failure_reasons)
@@ -850,6 +993,24 @@ print("-" * 100)
 print_tracking_diag(
     "Strict PnP rejected tracking diagnostics:",
     strict_pnp_rejected_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Prev-pose retry raw success tracking diagnostics:",
+    prev_pose_retry_success_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Prev-pose retry failure tracking diagnostics:",
+    prev_pose_retry_failure_diag
+)
+print("-" * 100)
+
+print_tracking_diag(
+    "Prev-pose retry rejected tracking diagnostics:",
+    prev_pose_retry_rejected_diag
 )
 print("-" * 100)
 
