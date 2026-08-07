@@ -112,3 +112,9 @@ KEYFRAME_WEAK_TRACKING_MIN_TRANSLATION = 2.0
 KEYFRAME_WEAK_TRACKING_MIN_ROTATION = 0.15
 
 KEYFRAME_MIN_MAP_POINTS_FOR_TRACKING_CHECK = 300
+
+# Local map selection ------------------------------------------------------------------------------------------------------------------
+
+LOCAL_MAP_MIN_POINTS = 500
+LOCAL_MAP_MAX_POINTS = 3000
+LOCAL_MAP_FALLBACK_RECENT_POINTS = 3000

@@ -50,26 +50,62 @@ def get_local_mappoints(
     keyframes,
     map_points,
     num_recent_keyframes=10,
-    fallback_max_points=3000
+    min_points=500,
+    max_points=3000,
+    fallback_recent_points=3000
 ):
     """
-    Собирает local map — MapPoints, которые наблюдались
-    в последних num_recent_keyframes KeyFrames.
+    Выбирает локальные MapPoints для tracking.
 
-    Если KeyFrames ещё нет, временно возвращает последние fallback_max_points
-    из общей карты.
+    Логика:
+        1. Сначала берём MapPoints из последних KeyFrames.
+        2. Если их слишком мало, добираем последние MapPoints из global map.
+        3. Удаляем дубликаты.
+        4. Ограничиваем итоговый список max_points.
+
+    Это защищает от ситуации, когда map_points становится очень большим,
+    но в tracking всё равно уходит ограниченное число кандидатов.
     """
-
-    # Если KeyFrames ещё нет, fallback на последние точки
-    if len(keyframes) == 0:
-        return list(map_points[-fallback_max_points:])
 
     local_mappoints_by_id = {}
 
-    recent_keyframes = keyframes[-num_recent_keyframes:]
+    # -------------------------------------------------------------------------
+    # 1. MapPoints из последних KeyFrames
+    # -------------------------------------------------------------------------
+    if len(keyframes) > 0:
 
-    for kf in recent_keyframes:
-        for mp in kf.map_points:
+        recent_keyframes = keyframes[-num_recent_keyframes:]
+
+        # идём от самых новых KeyFrames к более старым
+        for kf in reversed(recent_keyframes):
+
+            for mp in kf.map_points:
+
+                if mp is None:
+                    continue
+
+                if mp.id is None:
+                    continue
+
+                if mp.descriptor is None:
+                    continue
+
+                local_mappoints_by_id[mp.id] = mp
+
+                if len(local_mappoints_by_id) >= max_points:
+                    break
+
+            if len(local_mappoints_by_id) >= max_points:
+                break
+
+    # -------------------------------------------------------------------------
+    # 2. Fallback-добор из последних global map_points
+    # -------------------------------------------------------------------------
+    if len(local_mappoints_by_id) < min_points:
+
+        fallback_candidates = map_points[-fallback_recent_points:]
+
+        for mp in reversed(fallback_candidates):
 
             if mp is None:
                 continue
@@ -77,14 +113,37 @@ def get_local_mappoints(
             if mp.id is None:
                 continue
 
+            if mp.descriptor is None:
+                continue
+
+            if mp.id in local_mappoints_by_id:
+                continue
+
             local_mappoints_by_id[mp.id] = mp
 
-    # Если почему-то последние KeyFrames не дали точек,
-    # тоже fallback на последние точки карты
-    if len(local_mappoints_by_id) == 0:
-        return list(map_points[-fallback_max_points:])
+            if len(local_mappoints_by_id) >= max_points:
+                break
 
-    return list(local_mappoints_by_id.values())
+    local_mappoints = list(
+        local_mappoints_by_id.values()
+    )
+
+    # -------------------------------------------------------------------------
+    # 3. Сортировка: более устойчивые и более новые MapPoints выше
+    # -------------------------------------------------------------------------
+    local_mappoints = sorted(
+        local_mappoints,
+        key=lambda mp: (
+            getattr(mp, "num_observations", 0),
+            mp.id if mp.id is not None else -1
+        ),
+        reverse=True
+    )
+
+    # -------------------------------------------------------------------------
+    # 4. Жёсткий лимит
+    # -------------------------------------------------------------------------
+    return local_mappoints[:max_points]
 
 # ------------------------------------------------------------------------------------------------------------------------------------------
 def track_existing_mappoints(

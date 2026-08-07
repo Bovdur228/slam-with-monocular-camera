@@ -377,7 +377,9 @@ while True:
                 keyframes,
                 map_points,
                 num_recent_keyframes=cfg.LOCAL_MAP_RECENT_KEYFRAMES,
-                fallback_max_points=cfg.LOCAL_MAP_FALLBACK_POINTS
+                min_points=cfg.LOCAL_MAP_MIN_POINTS,
+                max_points=cfg.LOCAL_MAP_MAX_POINTS,
+                fallback_recent_points=cfg.LOCAL_MAP_FALLBACK_RECENT_POINTS
             )
             
             pnp_mode = None
