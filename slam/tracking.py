@@ -69,9 +69,7 @@ def get_local_mappoints(
 
     local_mappoints_by_id = {}
 
-    # -------------------------------------------------------------------------
     # 1. MapPoints из последних KeyFrames
-    # -------------------------------------------------------------------------
     if len(keyframes) > 0:
 
         recent_keyframes = keyframes[-num_recent_keyframes:]
@@ -98,9 +96,7 @@ def get_local_mappoints(
             if len(local_mappoints_by_id) >= max_points:
                 break
 
-    # -------------------------------------------------------------------------
     # 2. Fallback-добор из последних global map_points
-    # -------------------------------------------------------------------------
     if len(local_mappoints_by_id) < min_points:
 
         fallback_candidates = map_points[-fallback_recent_points:]
@@ -128,9 +124,7 @@ def get_local_mappoints(
         local_mappoints_by_id.values()
     )
 
-    # -------------------------------------------------------------------------
     # 3. Сортировка: более устойчивые и более новые MapPoints выше
-    # -------------------------------------------------------------------------
     local_mappoints = sorted(
         local_mappoints,
         key=lambda mp: (
@@ -140,9 +134,7 @@ def get_local_mappoints(
         reverse=True
     )
 
-    # -------------------------------------------------------------------------
     # 4. Жёсткий лимит
-    # -------------------------------------------------------------------------
     return local_mappoints[:max_points]
 
 # ------------------------------------------------------------------------------------------------------------------------------------------

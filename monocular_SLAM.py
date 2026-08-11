@@ -31,6 +31,8 @@ from slam.visualisation import (
 
 from slam.ba_runner import run_ba_test
 
+from slam.local_ba import run_local_ba
+
 from slam.culling import cull_mappoints
 
 from slam.keyframe_triangulation import triangulate_new_mappoints_between_keyframes
@@ -152,6 +154,271 @@ def print_tracking_diag(title, diag):
             diag["rotation_jump"]
         )
 
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def safe_float_list(values):
+    """
+    Оставляет только нормальные числовые значения.
+    """
+
+    clean_values = []
+
+    for value in values:
+
+        if value is None:
+            continue
+
+        if not np.isfinite(value):
+            continue
+
+        clean_values.append(
+            float(value)
+        )
+
+    return clean_values
+
+
+# --------------------------------------------------------------------------------------------------------------------------------------------
+def print_local_ba_summary(local_ba_history):
+    """
+    Печатает финальную статистику Local Bundle Adjustment.
+    """
+
+    print("=" * 100)
+    print("Local BA summary")
+    print("=" * 100)
+
+    if len(local_ba_history) == 0:
+        print("Local BA was never called.")
+        print("=" * 100)
+        return
+
+    calls_count = len(local_ba_history)
+
+    ran_count = sum(
+        1
+        for stats in local_ba_history
+        if stats.get("ran", False)
+    )
+
+    accepted_count = sum(
+        1
+        for stats in local_ba_history
+        if stats.get("accepted", False)
+    )
+
+    rejected_count = sum(
+        1
+        for stats in local_ba_history
+        if stats.get("ran", False)
+        and not stats.get("accepted", False)
+    )
+
+    skipped_count = calls_count - ran_count
+
+    reason_counter = {}
+
+    for stats in local_ba_history:
+        reason = stats.get("reason", "unknown")
+        reason_counter[reason] = reason_counter.get(reason, 0) + 1
+
+    print(f"Local BA calls:      {calls_count}")
+    print(f"Local BA ran:        {ran_count}")
+    print(f"Local BA accepted:   {accepted_count}")
+    print(f"Local BA rejected:   {rejected_count}")
+    print(f"Local BA skipped:    {skipped_count}")
+
+    if ran_count > 0:
+        print(
+            f"Accept ratio:        "
+            f"{accepted_count / ran_count:.3f}"
+        )
+
+    print("-" * 100)
+    print_counter(
+        "Local BA reasons:",
+        reason_counter
+    )
+
+    print("-" * 100)
+
+    ran_stats = [
+        stats
+        for stats in local_ba_history
+        if stats.get("ran", False)
+    ]
+
+    if len(ran_stats) == 0:
+        print("No optimizer runs to summarize.")
+        print("=" * 100)
+        return
+
+    mean_before_values = safe_float_list(
+        stats.get("mean_before")
+        for stats in ran_stats
+    )
+
+    mean_after_values = safe_float_list(
+        stats.get("mean_after")
+        for stats in ran_stats
+    )
+
+    median_before_values = safe_float_list(
+        stats.get("median_before")
+        for stats in ran_stats
+    )
+
+    median_after_values = safe_float_list(
+        stats.get("median_after")
+        for stats in ran_stats
+    )
+
+    max_before_values = safe_float_list(
+        stats.get("max_before")
+        for stats in ran_stats
+    )
+
+    max_after_values = safe_float_list(
+        stats.get("max_after")
+        for stats in ran_stats
+    )
+
+    max_camera_shift_values = safe_float_list(
+        stats.get("max_camera_shift")
+        for stats in ran_stats
+    )
+
+    keyframe_values = safe_float_list(
+        stats.get("keyframes")
+        for stats in ran_stats
+    )
+
+    mappoint_values = safe_float_list(
+        stats.get("map_points")
+        for stats in ran_stats
+    )
+
+    observation_values = safe_float_list(
+        stats.get("observations")
+        for stats in ran_stats
+    )
+
+    nfev_values = safe_float_list(
+        stats.get("nfev")
+        for stats in ran_stats
+    )
+
+    mean_improvements = []
+
+    for stats in ran_stats:
+
+        mean_before = stats.get("mean_before")
+        mean_after = stats.get("mean_after")
+
+        if mean_before is None or mean_after is None:
+            continue
+
+        if not np.isfinite(mean_before) or not np.isfinite(mean_after):
+            continue
+
+        mean_improvements.append(
+            float(mean_before - mean_after)
+        )
+
+    mean_improvement_percent_values = []
+
+    for stats in ran_stats:
+
+        mean_before = stats.get("mean_before")
+        mean_after = stats.get("mean_after")
+
+        if mean_before is None or mean_after is None:
+            continue
+
+        if not np.isfinite(mean_before) or not np.isfinite(mean_after):
+            continue
+
+        if mean_before <= 1e-12:
+            continue
+
+        mean_improvement_percent_values.append(
+            float((mean_before - mean_after) / mean_before * 100.0)
+        )
+
+    print_numeric_summary(
+        "mean_before",
+        mean_before_values
+    )
+
+    print_numeric_summary(
+        "mean_after",
+        mean_after_values
+    )
+
+    print_numeric_summary(
+        "mean_improvement",
+        mean_improvements
+    )
+
+    print_numeric_summary(
+        "mean_improvement_percent",
+        mean_improvement_percent_values
+    )
+
+    print("-" * 100)
+
+    print_numeric_summary(
+        "median_before",
+        median_before_values
+    )
+
+    print_numeric_summary(
+        "median_after",
+        median_after_values
+    )
+
+    print("-" * 100)
+
+    print_numeric_summary(
+        "max_before",
+        max_before_values
+    )
+
+    print_numeric_summary(
+        "max_after",
+        max_after_values
+    )
+
+    print("-" * 100)
+
+    print_numeric_summary(
+        "max_camera_shift",
+        max_camera_shift_values
+    )
+
+    print("-" * 100)
+
+    print_numeric_summary(
+        "optimized_keyframes",
+        keyframe_values
+    )
+
+    print_numeric_summary(
+        "optimized_mappoints",
+        mappoint_values
+    )
+
+    print_numeric_summary(
+        "observations",
+        observation_values
+    )
+
+    print_numeric_summary(
+        "nfev",
+        nfev_values
+    )
+
+    print("=" * 100)
+
 # ========================================================================================================================================
 
 # захват видео ----------------------------------------------------------------------------------------------------------------------
@@ -248,6 +515,9 @@ retry_pnp_rejected_diag = create_tracking_diag()
 prev_pose_retry_success_diag = create_tracking_diag()
 prev_pose_retry_failure_diag = create_tracking_diag()
 prev_pose_retry_rejected_diag = create_tracking_diag()
+
+# Local BA diagnostics ---------------------------------------------------------------------------------------------------------------
+local_ba_history = []
 
 
 # счётчик кадров после последнего созданного Keyframe ---------------------------------------------------------------------------------
@@ -856,6 +1126,70 @@ while True:
                         max_new_points=cfg.KEYFRAME_TRIANGULATION_MAX_NEW_POINTS
                     )
 
+                    # -------------------------------------------------------------------------
+                    # Local Bundle Adjustment
+                    # -------------------------------------------------------------------------
+                    if (
+                        cfg.LOCAL_BA_ENABLED
+                        and len(keyframes) >= cfg.LOCAL_BA_MIN_KEYFRAMES
+                        and len(keyframes) % cfg.LOCAL_BA_EVERY_KEYFRAMES == 0
+                    ):
+
+                        local_ba_stats = run_local_ba(
+                            keyframes=keyframes,
+                            map_points=map_points,
+                            K=K,
+                            current_keyframe=current_kf,
+                            window_size=cfg.LOCAL_BA_WINDOW_SIZE,
+                            max_map_points=cfg.LOCAL_BA_MAX_MAP_POINTS,
+                            min_keyframes=cfg.LOCAL_BA_MIN_KEYFRAMES,
+                            min_mp_observations=cfg.LOCAL_BA_MIN_MP_OBSERVATIONS,
+                            min_kf_observations=cfg.LOCAL_BA_MIN_KF_OBSERVATIONS,
+                            max_initial_residual=cfg.LOCAL_BA_MAX_INITIAL_RESIDUAL,
+                            max_cleanup_iterations=cfg.LOCAL_BA_MAX_CLEANUP_ITERATIONS,
+                            ba_max_nfev=cfg.LOCAL_BA_MAX_NFEV,
+                            huber_f_scale=cfg.LOCAL_BA_HUBER_F_SCALE,
+                            max_mean_residual_increase=cfg.LOCAL_BA_MAX_MEAN_RESIDUAL_INCREASE,
+                            max_camera_shift=cfg.LOCAL_BA_MAX_CAMERA_SHIFT,
+                            verbose=cfg.LOCAL_BA_VERBOSE
+                        )
+
+                        local_ba_history.append(
+                            local_ba_stats
+                        )
+
+                        if local_ba_stats["accepted"]:
+
+                            # current_kf мог быть слегка уточнён Local BA,
+                            # поэтому синхронизируем live pose с pose текущего KeyFrame.
+                            global_R = current_kf.R.copy()
+                            global_t = current_kf.t.copy()
+
+                        if local_ba_stats["ran"]:
+
+                            print(
+                                f"Local BA: "
+                                f"accepted={local_ba_stats['accepted']} "
+                                f"reason={local_ba_stats['reason']} "
+                                f"KFs={local_ba_stats['keyframes']} "
+                                f"MPs={local_ba_stats['map_points']} "
+                                f"Obs={local_ba_stats['observations']} "
+                                f"mean={local_ba_stats['mean_before']:.3f}->{local_ba_stats['mean_after']:.3f} "
+                                f"median={local_ba_stats['median_before']:.3f}->{local_ba_stats['median_after']:.3f} "
+                                f"max_shift={local_ba_stats['max_camera_shift']:.6f} "
+                                f"nfev={local_ba_stats['nfev']}"
+                            )
+
+                        else:
+
+                            print(
+                                f"Local BA skipped: "
+                                f"reason={local_ba_stats['reason']} "
+                                f"KFs={local_ba_stats['keyframes']} "
+                                f"MPs={local_ba_stats['map_points']} "
+                                f"Obs={local_ba_stats['observations']}"
+                            )
+
                     last_keyFrame_t = global_t.copy()
                     last_keyFrame_R = global_R.copy()
 
@@ -1066,6 +1400,11 @@ print_tracking_diag(
     retry_pnp_rejected_diag
 )
 print("-" * 100)
+
+# ------------------------------------------------------------------
+print_local_ba_summary(
+    local_ba_history
+)
 
 # ------------------------------------------------------------------
 run_ba_test(

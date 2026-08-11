@@ -118,3 +118,42 @@ KEYFRAME_MIN_MAP_POINTS_FOR_TRACKING_CHECK = 300
 LOCAL_MAP_MIN_POINTS = 500
 LOCAL_MAP_MAX_POINTS = 3000
 LOCAL_MAP_FALLBACK_RECENT_POINTS = 3000
+
+# =========================================================================================================================================
+# LOCAL BUNDLE ADJUSTMENT
+# =========================================================================================================================================
+
+LOCAL_BA_ENABLED = True
+
+# Запускать Local BA только когда KeyFrames уже достаточно.
+LOCAL_BA_MIN_KEYFRAMES = 4
+
+# Размер локального окна.
+# Первый KeyFrame внутри окна будет fixed/anchor.
+LOCAL_BA_WINDOW_SIZE = 7
+
+# Запускать не на каждом KeyFrame, а через N KeyFrames.
+# Для первого теста 2 — более безопасно по скорости.
+LOCAL_BA_EVERY_KEYFRAMES = 2
+
+# Сколько MapPoints максимум отдавать в Local BA.
+LOCAL_BA_MAX_MAP_POINTS = 800
+
+# Фильтрация BA-графа.
+LOCAL_BA_MIN_MP_OBSERVATIONS = 2
+LOCAL_BA_MIN_KF_OBSERVATIONS = 10
+LOCAL_BA_MAX_INITIAL_RESIDUAL = 50.0
+LOCAL_BA_MAX_CLEANUP_ITERATIONS = 10
+
+# Ограничение оптимизации, чтобы runtime не зависал надолго.
+LOCAL_BA_MAX_NFEV = 20
+
+# Robust loss.
+LOCAL_BA_HUBER_F_SCALE = 5.0
+
+# Safety-check результата.
+LOCAL_BA_MAX_MEAN_RESIDUAL_INCREASE = 1.05
+LOCAL_BA_MAX_CAMERA_SHIFT = 5.0
+
+# Если True, scipy least_squares будет печатать подробный optimization log.
+LOCAL_BA_VERBOSE = False
