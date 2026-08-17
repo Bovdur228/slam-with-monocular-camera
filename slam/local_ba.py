@@ -348,6 +348,342 @@ def compute_max_keyframe_shift(
 
     return max_shift, max_shift_keyframe_id
 
+# ---------------------------------------------------------------------------------------------------------------------------------
+def project_mappoint_to_keyframe(
+    map_point,
+    keyframe,
+    K
+):
+    """
+    Проецирует MapPoint в изображение конкретного KeyFrame.
+
+    Возвращает:
+        np.array([u, v]) или None, если точка находится за камерой.
+    """
+
+    if map_point is None:
+        return None
+
+    if keyframe is None:
+        return None
+
+    if map_point.position is None:
+        return None
+
+    Pw = map_point.position.reshape(3, 1)
+
+    Pc = keyframe.R.T @ (
+        Pw - keyframe.t
+    )
+
+    if Pc[2, 0] <= 0:
+        return None
+
+    pixel = K @ Pc
+
+    u = pixel[0, 0] / pixel[2, 0]
+    v = pixel[1, 0] / pixel[2, 0]
+
+    if not np.isfinite(u) or not np.isfinite(v):
+        return None
+
+    return np.array(
+        [u, v],
+        dtype=np.float64
+    )
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def compute_observation_reprojection_error(
+    map_point,
+    observation,
+    K
+):
+    """
+    Считает reprojection error для одной observation.
+    """
+
+    if observation is None:
+        return None
+
+    keyframe = observation.keyframe
+
+    if keyframe is None:
+        return None
+
+    if observation.keypoint_idx is None:
+        return None
+
+    keypoint_idx = int(
+        observation.keypoint_idx
+    )
+
+    if keypoint_idx < 0:
+        return None
+
+    if keypoint_idx >= len(keyframe.kp):
+        return None
+
+    projected_uv = project_mappoint_to_keyframe(
+        map_point,
+        keyframe,
+        K
+    )
+
+    if projected_uv is None:
+        return None
+
+    observed_uv = np.array(
+        keyframe.kp[keypoint_idx].pt,
+        dtype=np.float64
+    )
+
+    reprojection_error = np.linalg.norm(
+        projected_uv - observed_uv
+    )
+
+    if not np.isfinite(reprojection_error):
+        return None
+
+    return float(
+        reprojection_error
+    )
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def keyframe_still_observes_mappoint(
+    keyframe,
+    map_point
+):
+    """
+    Проверяет, осталась ли у MapPoint observation в данном KeyFrame.
+    """
+
+    for observation in map_point.observations:
+
+        if observation.keyframe is keyframe:
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def remove_observation_link(
+    map_point,
+    observation
+):
+    """
+    Удаляет одну observation-связь из MapPoint и соответствующего KeyFrame.
+    """
+
+    keyframe = observation.keyframe
+
+    before_observations = len(
+        map_point.observations
+    )
+
+    map_point.observations = [
+        current_observation
+        for current_observation in map_point.observations
+        if current_observation is not observation
+    ]
+
+    after_observations = len(
+        map_point.observations
+    )
+
+    removed_from_mappoint = (
+        after_observations < before_observations
+    )
+
+    map_point.num_observations = len(
+        map_point.observations
+    )
+
+    removed_from_keyframe = False
+
+    if keyframe is not None:
+
+        if not keyframe_still_observes_mappoint(
+            keyframe,
+            map_point
+        ):
+
+            before_keyframe_points = len(
+                keyframe.map_points
+            )
+
+            keyframe.map_points = [
+                current_map_point
+                for current_map_point in keyframe.map_points
+                if current_map_point is not map_point
+            ]
+
+            after_keyframe_points = len(
+                keyframe.map_points
+            )
+
+            removed_from_keyframe = (
+                after_keyframe_points < before_keyframe_points
+            )
+
+    return removed_from_mappoint, removed_from_keyframe
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+def reject_local_ba_outliers(
+    keyframes,
+    map_points,
+    K,
+    max_reprojection_error=12.0,
+    min_observations_to_keep=2
+):
+    """
+    Удаляет плохие observation-связи после accepted Local BA.
+
+    Важно:
+        - MapPoints напрямую не удаляются.
+        - Удаляются только плохие observations.
+        - Слабые MapPoints потом должен удалить обычный culling.
+    """
+
+    stats = {
+        "outlier_rejection_ran": True,
+        "outlier_checked_observations": 0,
+        "outlier_removed_observations": 0,
+        "outlier_removed_from_keyframes": 0,
+        "outlier_affected_mappoints": 0,
+        "outlier_affected_keyframes": 0,
+        "outlier_skipped_min_observations": 0,
+        "outlier_invalid_projection": 0,
+        "outlier_high_error": 0,
+        "outlier_error_mean": None,
+        "outlier_error_median": None,
+        "outlier_error_max": None,
+    }
+
+    local_keyframe_ids = {
+        keyframe.id
+        for keyframe in keyframes
+    }
+
+    valid_errors = []
+
+    affected_mappoint_ids = set()
+    affected_keyframe_ids = set()
+
+    for map_point in map_points:
+
+        if map_point is None:
+            continue
+
+        if map_point.id is None:
+            continue
+
+        observations_copy = list(
+            map_point.observations
+        )
+
+        for observation in observations_copy:
+
+            if observation is None:
+                continue
+
+            keyframe = observation.keyframe
+
+            if keyframe is None:
+                continue
+
+            if keyframe.id not in local_keyframe_ids:
+                continue
+
+            stats["outlier_checked_observations"] += 1
+
+            reprojection_error = compute_observation_reprojection_error(
+                map_point,
+                observation,
+                K
+            )
+
+            is_invalid_projection = (
+                reprojection_error is None
+            )
+
+            is_high_error = (
+                reprojection_error is not None
+                and reprojection_error > max_reprojection_error
+            )
+
+            if reprojection_error is not None:
+                valid_errors.append(
+                    reprojection_error
+                )
+
+            if not is_invalid_projection and not is_high_error:
+                continue
+
+            if len(map_point.observations) <= min_observations_to_keep:
+
+                stats["outlier_skipped_min_observations"] += 1
+                continue
+
+            removed_from_mappoint, removed_from_keyframe = remove_observation_link(
+                map_point,
+                observation
+            )
+
+            if not removed_from_mappoint:
+                continue
+
+            stats["outlier_removed_observations"] += 1
+
+            affected_mappoint_ids.add(
+                map_point.id
+            )
+
+            if keyframe.id is not None:
+                affected_keyframe_ids.add(
+                    keyframe.id
+                )
+
+            if removed_from_keyframe:
+                stats["outlier_removed_from_keyframes"] += 1
+
+            if is_invalid_projection:
+                stats["outlier_invalid_projection"] += 1
+
+            if is_high_error:
+                stats["outlier_high_error"] += 1
+
+    if len(valid_errors) > 0:
+
+        valid_errors = np.asarray(
+            valid_errors,
+            dtype=np.float64
+        )
+
+        stats["outlier_error_mean"] = float(
+            np.mean(valid_errors)
+        )
+
+        stats["outlier_error_median"] = float(
+            np.median(valid_errors)
+        )
+
+        stats["outlier_error_max"] = float(
+            np.max(valid_errors)
+        )
+
+    stats["outlier_affected_mappoints"] = len(
+        affected_mappoint_ids
+    )
+
+    stats["outlier_affected_keyframes"] = len(
+        affected_keyframe_ids
+    )
+
+    return stats
+
 
 # ---------------------------------------------------------------------------------------------------------------------------------
 def run_local_ba(
@@ -366,6 +702,9 @@ def run_local_ba(
     huber_f_scale=5.0,
     max_mean_residual_increase=1.05,
     max_camera_shift=5.0,
+    outlier_rejection_enabled=False,
+    outlier_reprojection_error=12.0,
+    outlier_min_observations_to_keep=2,
     verbose=False
 ):
     """
@@ -398,6 +737,18 @@ def run_local_ba(
         "nfev": None,
         "success": None,
         "message": None,
+        "outlier_rejection_ran": False,
+        "outlier_checked_observations": 0,
+        "outlier_removed_observations": 0,
+        "outlier_removed_from_keyframes": 0,
+        "outlier_affected_mappoints": 0,
+        "outlier_affected_keyframes": 0,
+        "outlier_skipped_min_observations": 0,
+        "outlier_invalid_projection": 0,
+        "outlier_high_error": 0,
+        "outlier_error_mean": None,
+        "outlier_error_median": None,
+        "outlier_error_max": None,
     }
 
     local_keyframes = select_local_keyframes(
@@ -572,6 +923,21 @@ def run_local_ba(
         stats["reason"] = "camera_shift_too_large"
 
     else:
+
+        if outlier_rejection_enabled:
+
+            outlier_stats = reject_local_ba_outliers(
+                optimized_keyframes,
+                optimized_map_points,
+                K,
+                max_reprojection_error=outlier_reprojection_error,
+                min_observations_to_keep=outlier_min_observations_to_keep
+            )
+
+            stats.update(
+                outlier_stats
+            )
+
         stats["accepted"] = True
         stats["reason"] = "accepted"
         return stats

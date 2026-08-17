@@ -157,3 +157,13 @@ LOCAL_BA_MAX_CAMERA_SHIFT = 5.0
 
 # Если True, scipy least_squares будет печатать подробный optimization log.
 LOCAL_BA_VERBOSE = False
+
+# Local BA outlier rejection ------------------------------------------------------------------------------------------------------------
+
+LOCAL_BA_OUTLIER_REJECTION_ENABLED = True
+
+# Observation считается плохой, если после Local BA reprojection error выше этого порога.
+LOCAL_BA_OUTLIER_REPROJECTION_ERROR = 12.0
+
+# Не удаляем observation, если после удаления у MapPoint останется меньше этого числа observations.
+LOCAL_BA_OUTLIER_MIN_OBSERVATIONS_TO_KEEP = 2

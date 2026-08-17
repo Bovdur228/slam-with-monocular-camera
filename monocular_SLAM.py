@@ -307,6 +307,36 @@ def print_local_ba_summary(local_ba_history):
         for stats in ran_stats
     )
 
+    outlier_checked_values = safe_float_list(
+        stats.get("outlier_checked_observations")
+        for stats in ran_stats
+    )
+
+    outlier_removed_values = safe_float_list(
+        stats.get("outlier_removed_observations")
+        for stats in ran_stats
+    )
+
+    outlier_removed_from_keyframes_values = safe_float_list(
+        stats.get("outlier_removed_from_keyframes")
+        for stats in ran_stats
+    )
+
+    outlier_affected_mappoint_values = safe_float_list(
+        stats.get("outlier_affected_mappoints")
+        for stats in ran_stats
+    )
+
+    outlier_affected_keyframe_values = safe_float_list(
+        stats.get("outlier_affected_keyframes")
+        for stats in ran_stats
+    )
+
+    outlier_skipped_min_observations_values = safe_float_list(
+        stats.get("outlier_skipped_min_observations")
+        for stats in ran_stats
+    )
+
     mean_improvements = []
 
     for stats in ran_stats:
@@ -415,6 +445,61 @@ def print_local_ba_summary(local_ba_history):
     print_numeric_summary(
         "nfev",
         nfev_values
+    )
+
+    print("-" * 100)
+
+    outlier_ran_count = sum(
+        1
+        for stats in ran_stats
+        if stats.get("outlier_rejection_ran", False)
+    )
+
+    total_removed_observations = sum(
+        int(stats.get("outlier_removed_observations", 0))
+        for stats in ran_stats
+    )
+
+    total_checked_observations = sum(
+        int(stats.get("outlier_checked_observations", 0))
+        for stats in ran_stats
+    )
+
+    print(f"Local BA outlier rejection ran: {outlier_ran_count}")
+
+    print(
+        f"Total outlier observations removed: "
+        f"{total_removed_observations}/{total_checked_observations}"
+    )
+
+    print_numeric_summary(
+        "outlier_checked_observations",
+        outlier_checked_values
+    )
+
+    print_numeric_summary(
+        "outlier_removed_observations",
+        outlier_removed_values
+    )
+
+    print_numeric_summary(
+        "outlier_removed_from_keyframes",
+        outlier_removed_from_keyframes_values
+    )
+
+    print_numeric_summary(
+        "outlier_affected_mappoints",
+        outlier_affected_mappoint_values
+    )
+
+    print_numeric_summary(
+        "outlier_affected_keyframes",
+        outlier_affected_keyframe_values
+    )
+
+    print_numeric_summary(
+        "outlier_skipped_min_observations",
+        outlier_skipped_min_observations_values
     )
 
     print("=" * 100)
@@ -1151,6 +1236,9 @@ while True:
                             huber_f_scale=cfg.LOCAL_BA_HUBER_F_SCALE,
                             max_mean_residual_increase=cfg.LOCAL_BA_MAX_MEAN_RESIDUAL_INCREASE,
                             max_camera_shift=cfg.LOCAL_BA_MAX_CAMERA_SHIFT,
+                            outlier_rejection_enabled=cfg.LOCAL_BA_OUTLIER_REJECTION_ENABLED,
+                            outlier_reprojection_error=cfg.LOCAL_BA_OUTLIER_REPROJECTION_ERROR,
+                            outlier_min_observations_to_keep=cfg.LOCAL_BA_OUTLIER_MIN_OBSERVATIONS_TO_KEEP,
                             verbose=cfg.LOCAL_BA_VERBOSE
                         )
 
@@ -1177,7 +1265,9 @@ while True:
                                 f"mean={local_ba_stats['mean_before']:.3f}->{local_ba_stats['mean_after']:.3f} "
                                 f"median={local_ba_stats['median_before']:.3f}->{local_ba_stats['median_after']:.3f} "
                                 f"max_shift={local_ba_stats['max_camera_shift']:.6f} "
-                                f"nfev={local_ba_stats['nfev']}"
+                                f"nfev={local_ba_stats['nfev']} "
+                                f"outliers={local_ba_stats['outlier_removed_observations']}/"
+                                f"{local_ba_stats['outlier_checked_observations']}"
                             )
 
                         else:

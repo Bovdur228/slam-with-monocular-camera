@@ -20,7 +20,6 @@ class MapPoint:
         position,
         descriptor,
         created_keyframe_id=None
-        
     ):
 
         self.position = position
