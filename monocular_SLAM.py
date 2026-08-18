@@ -37,6 +37,8 @@ from slam.culling import cull_mappoints
 
 from slam.keyframe_triangulation import triangulate_new_mappoints_between_keyframes
 
+from slam.covisibility import CovisibilityGraph
+
 # ==============================================================================================================================================
 
 def increment_counter(counter, reason):
@@ -1495,6 +1497,284 @@ print("-" * 100)
 print_local_ba_summary(
     local_ba_history
 )
+
+# =========================================================================================================================================
+# Covisibility Graph diagnostics
+# =========================================================================================================================================
+
+print("=" * 100)
+print("Covisibility Graph diagnostics")
+print("=" * 100)
+
+covisibility_graph = CovisibilityGraph(
+    min_shared_mappoints=15
+)
+
+covisibility_stats = covisibility_graph.rebuild(
+    keyframes
+)
+
+print("Covisibility Graph stats:")
+print(covisibility_stats)
+print("-" * 100)
+
+
+# -------------------------------------------------------------------------
+# Проверка последних KeyFrames и их strongest neighbours
+# -------------------------------------------------------------------------
+
+num_keyframes_to_inspect = min(
+    10,
+    len(keyframes)
+)
+
+if num_keyframes_to_inspect > 0:
+
+    print(
+        f"Strongest covisible neighbours for last "
+        f"{num_keyframes_to_inspect} KeyFrames:"
+    )
+
+    print("-" * 100)
+
+    for keyframe in keyframes[-num_keyframes_to_inspect:]:
+
+        neighbors = covisibility_graph.get_best_neighbors(
+            keyframe,
+            max_neighbors=5
+        )
+
+        neighbor_info = [
+            (
+                neighbor_kf.id,
+                weight
+            )
+            for neighbor_kf, weight in neighbors
+        ]
+
+        print(
+            f"KF {keyframe.id}: "
+            f"{neighbor_info}"
+        )
+
+else:
+
+    print(
+        "No KeyFrames available for Covisibility Graph diagnostics."
+    )
+
+
+print("-" * 100)
+
+
+# -------------------------------------------------------------------------
+# Проверка симметричности графа
+# -------------------------------------------------------------------------
+
+asymmetry_errors = []
+
+for kf_id, neighbors in covisibility_graph.graph.items():
+
+    for other_kf_id, weight in neighbors.items():
+
+        reverse_weight = covisibility_graph.graph.get(
+            other_kf_id,
+            {}
+        ).get(
+            kf_id,
+            0
+        )
+
+        if reverse_weight != weight:
+
+            asymmetry_errors.append(
+                (
+                    kf_id,
+                    other_kf_id,
+                    weight,
+                    reverse_weight
+                )
+            )
+
+print(
+    f"Symmetry errors: "
+    f"{len(asymmetry_errors)}"
+)
+
+if len(asymmetry_errors) > 0:
+
+    print(
+        "First symmetry errors:"
+    )
+
+    for error in asymmetry_errors[:10]:
+        print(error)
+
+
+print("-" * 100)
+
+
+# -------------------------------------------------------------------------
+# Проверка self-edges
+# -------------------------------------------------------------------------
+
+self_edges = []
+
+for kf_id, neighbors in covisibility_graph.graph.items():
+
+    if kf_id in neighbors:
+
+        self_edges.append(
+            (
+                kf_id,
+                neighbors[kf_id]
+            )
+        )
+
+print(
+    f"Self edges: "
+    f"{len(self_edges)}"
+)
+
+if len(self_edges) > 0:
+
+    print(
+        "Self-edge examples:"
+    )
+
+    for edge in self_edges[:10]:
+        print(edge)
+
+
+print("-" * 100)
+
+
+# ------------------------------------------------------------------------
+# Проверка threshold
+# -------------------------------------------------------------------------
+
+weak_edges = []
+
+for kf_id, neighbors in covisibility_graph.graph.items():
+
+    for other_kf_id, weight in neighbors.items():
+
+        if weight < covisibility_graph.min_shared_mappoints:
+
+            weak_edges.append(
+                (
+                    kf_id,
+                    other_kf_id,
+                    weight
+                )
+            )
+
+print(
+    f"Edges below threshold: "
+    f"{len(weak_edges)}"
+)
+
+if len(weak_edges) > 0:
+
+    print(
+        "Weak edge examples:"
+    )
+
+    for edge in weak_edges[:10]:
+        print(edge)
+
+
+print("-" * 100)
+
+
+# -------------------------------------------------------------------------
+# Проверка consistency get_weight()
+# -------------------------------------------------------------------------
+
+weight_mismatch_errors = []
+
+for kf_id, neighbors in covisibility_graph.graph.items():
+
+    for other_kf_id, stored_weight in neighbors.items():
+
+        queried_weight = covisibility_graph.get_weight(
+            kf_id,
+            other_kf_id
+        )
+
+        if queried_weight != stored_weight:
+
+            weight_mismatch_errors.append(
+                (
+                    kf_id,
+                    other_kf_id,
+                    stored_weight,
+                    queried_weight
+                )
+            )
+
+print(
+    f"get_weight consistency errors: "
+    f"{len(weight_mismatch_errors)}"
+)
+
+print("-" * 100)
+
+# -------------------------------------------------------------------------
+# Прямая проверка веса strongest edge через пересечение map_points
+# -------------------------------------------------------------------------
+
+if len(keyframes) > 0:
+
+    test_kf = keyframes[-1]
+
+    neighbors = covisibility_graph.get_best_neighbors(
+        test_kf,
+        max_neighbors=1
+    )
+
+    if len(neighbors) > 0:
+
+        neighbor_kf, graph_weight = neighbors[0]
+
+        test_mp_ids = {
+            mp.id
+            for mp in test_kf.map_points
+            if mp is not None and mp.id is not None
+        }
+
+        neighbor_mp_ids = {
+            mp.id
+            for mp in neighbor_kf.map_points
+            if mp is not None and mp.id is not None
+        }
+
+        direct_shared_count = len(
+            test_mp_ids & neighbor_mp_ids
+        )
+
+        print(
+            f"Direct validation: "
+            f"KF {test_kf.id} <-> KF {neighbor_kf.id}: "
+            f"graph_weight={graph_weight}, "
+            f"direct_shared={direct_shared_count}"
+        )
+
+    else:
+
+        print(
+            f"Direct validation: "
+            f"KF {test_kf.id} has no covisible neighbours."
+        )
+
+else:
+
+    print(
+        "Direct validation: no KeyFrames available."
+    )
+
+
+print("=" * 100)
 
 # ------------------------------------------------------------------
 run_ba_test(
