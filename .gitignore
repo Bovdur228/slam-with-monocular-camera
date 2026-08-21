@@ -1,6 +1,6 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 
 # Virtual environments
 venv/
@@ -18,3 +18,19 @@ calibration/
 # System files
 .DS_Store
 Thumbs.db
+
+# C++ / pybind11 build artifacts
+cpp/build/
+*.pyd
+*.dll
+*.lib
+*.exp
+*.obj
+
+# CMake / Visual Studio generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.vcxproj
+*.vcxproj.filters
+*.sln
